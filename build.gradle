@@ -1,0 +1,55 @@
+plugins {
+    id 'java-library'
+}
+
+group = 'com.madras'
+version = '0.1.0'
+
+repositories {
+    mavenCentral()
+}
+
+sourceSets {
+    main {
+        java { srcDirs = ['java/src/main/java'] }
+        resources { srcDirs = ['java/src/main/resources'] }
+    }
+}
+
+java {
+    // Java 8 bytecode floor: runs on any JVM 8+ (broad Spark cluster
+    // compatibility) and is fully compatible with Android's D8/R8
+    // desugaring, so the same source builds for both a desktop JAR and an
+    // Android-consumable artifact without forking the code.
+    sourceCompatibility = JavaVersion.VERSION_1_8
+    targetCompatibility = JavaVersion.VERSION_1_8
+}
+
+dependencies {
+    // Spark is a "provided"-style dependency -- the connector runs inside a
+    // Spark process, which already has these on its classpath. Adjust the
+    // version to match your target Spark's Scala build (2.12 vs 2.13).
+    compileOnly 'org.apache.spark:spark-sql_2.12:3.5.1'
+    compileOnly 'org.apache.spark:spark-catalyst_2.12:3.5.1'
+
+    testImplementation 'org.apache.spark:spark-sql_2.12:3.5.1'
+    testImplementation 'org.junit.jupiter:junit-jupiter:5.10.0'
+}
+
+test {
+    useJUnitPlatform()
+}
+
+// --------------------------------------------------------------------
+// Native library packaging: copies whatever's under
+// native/build-out/<os-arch>/libmadras_jni.* into the JAR's
+// resources/natives/<os-arch>/ tree, matching MadrasNative.java's lookup
+// path. Run the native CMake build for each target platform first (see
+// README), placing outputs under native/build-out/<os-arch>/ before
+// running `./gradlew jar`.
+// --------------------------------------------------------------------
+processResources {
+    from('native/build-out') {
+        into 'natives'
+    }
+}
