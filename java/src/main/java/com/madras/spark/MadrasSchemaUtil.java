@@ -3,6 +3,7 @@ package com.madras.spark;
 import com.madras.MadrasReader;
 import org.apache.spark.sql.types.DataType;
 import org.apache.spark.sql.types.DataTypes;
+import org.apache.spark.sql.types.Metadata;
 import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
 
@@ -22,7 +23,7 @@ final class MadrasSchemaUtil {
             int i = 0;
             for (MadrasReader.ColumnMeta c : meta.columns) {
                 if (c.type == 'S') break; // stop at secondary-index columns, same as the DuckDB extension
-                fields[i++] = new StructField(c.name, sparkTypeFor(c.type), true, null);
+                fields[i++] = new StructField(c.name, sparkTypeFor(c.type), true, Metadata.empty());
             }
             return new StructType(fields);
         }

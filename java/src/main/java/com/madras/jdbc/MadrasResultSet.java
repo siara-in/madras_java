@@ -13,46 +13,116 @@ import com.madras.MadrasReader;
  */
 public final class MadrasResultSet implements java.sql.ResultSet {
 
+    // Sub-batch size for lazy fetching: at most this many rows' worth of
+    // column data is materialized at once, regardless of how many total row
+    // ids matched. This is what actually prevents an unbounded "SELECT *
+    // FROM huge_table" from trying to load millions of rows into a single
+    // Java array up front -- rowIds itself is a cheap long[] (matched row
+    // ids only), but the actual column DATA is fetched incrementally as
+    // next() advances, mirroring MadrasPartitionReader's approach on the
+    // Spark side.
+    private static final int SUB_BATCH_SIZE = 50_000;
+
+    private final MadrasReader reader;
     private final String[] columnNames;
-    private final Object[][] rowMajorData; // [row][col], already materialized (see MadrasStatement)
+    private final int[] colIndices;
     private final long[] rowIds;
     private final MadrasResultSetMetaData metaData;
+    private final Object[][] staticData; // non-null only for the static/pre-materialized constructor
 
-    private int cursor = -1;
+    private int cursor = -1;              // position within rowIds
     private boolean started = false;
     private boolean closed = false;
     private boolean lastWasNull = false;
 
-    MadrasResultSet(String[] columnNames, Object[][] rowMajorData, long[] rowIds,
+    private Object[] currentBatchCols;    // column-major: one Object per column for the current sub-batch
+    private int batchStart = -1;          // index into rowIds where the current batch begins
+    private int batchLen = 0;
+    private int batchPos = 0;             // position within the current batch
+
+    MadrasResultSet(MadrasReader reader, String[] columnNames, int[] colIndices, long[] rowIds,
                      MadrasResultSetMetaData metaData) {
+        this.reader = reader;
         this.columnNames = columnNames;
-        this.rowMajorData = rowMajorData;
+        this.colIndices = colIndices;
         this.rowIds = rowIds;
         this.metaData = metaData;
+        this.staticData = null;
+    }
+
+    /**
+     * Static/pre-materialized variant, for small in-memory result sets that
+     * aren't backed by a MadrasReader lookup at all -- used by
+     * MadrasDatabaseMetaData's synthetic getTables()/getColumns()/etc.
+     * result sets, which are hand-built rows, not query results.
+     */
+    MadrasResultSet(String[] columnNames, Object[][] staticRowMajorData, long[] rowIds,
+                     MadrasResultSetMetaData metaData) {
+        this.reader = null;
+        this.columnNames = columnNames;
+        this.colIndices = null;
+        this.rowIds = rowIds;
+        this.metaData = metaData;
+        this.staticData = staticRowMajorData;
+    }
+
+    private void fetchNextBatch() {
+        int start = cursor;
+        int end = Math.min(start + SUB_BATCH_SIZE, rowIds.length);
+        if (staticData != null) {
+            batchStart = start;
+            batchLen = end - start;
+            batchPos = 0;
+            return;
+        }
+        long[] slice = java.util.Arrays.copyOfRange(rowIds, start, end);
+        currentBatchCols = reader.getColumnsByIds(slice, colIndices);
+        batchStart = start;
+        batchLen = slice.length;
+        batchPos = 0;
+    }
+
+    private Object extractFromBatch(int colIdx) {
+        if (staticData != null) {
+            return staticData[batchStart + batchPos][colIdx];
+        }
+        Object columnData = currentBatchCols[colIdx];
+        if (columnData instanceof double[]) {
+            double v = ((double[]) columnData)[batchPos];
+            return Double.isNaN(v) ? null : (Double) v;
+        }
+        if (columnData instanceof String[]) return ((String[]) columnData)[batchPos];
+        if (columnData instanceof byte[][]) return ((byte[][]) columnData)[batchPos];
+        return null;
     }
 
     private Object rawValue(int columnIndex) throws java.sql.SQLException {
         if (closed) throw new java.sql.SQLException("ResultSet is closed");
-        if (!started || cursor >= rowMajorData.length) {
+        if (!started || cursor >= rowIds.length) {
             throw new java.sql.SQLException("No current row -- call next() first");
         }
         if (columnIndex < 1 || columnIndex > columnNames.length) {
             throw new java.sql.SQLException("Invalid column index: " + columnIndex);
         }
-        return rowMajorData[cursor][columnIndex - 1];
+        return extractFromBatch(columnIndex - 1);
     }
 
     @Override
     public boolean next() throws java.sql.SQLException {
         if (closed) throw new java.sql.SQLException("ResultSet is closed");
-        if (cursor >= rowIds.length - 1 && started) return false;
         if (!started) {
             started = true;
             cursor = 0;
-            return rowIds.length > 0;
+        } else {
+            cursor++;
         }
-        cursor++;
-        return cursor < rowIds.length;
+        if (cursor >= rowIds.length) return false;
+        if (batchStart == -1 || cursor >= batchStart + batchLen) {
+            fetchNextBatch();
+        } else {
+            batchPos = cursor - batchStart;
+        }
+        return true;
     }
 
     @Override

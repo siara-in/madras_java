@@ -89,4 +89,7 @@ jni/build/
 *.swo
 *~
 ```
+spark-warehouse
+derby.log
+metastore_db
 

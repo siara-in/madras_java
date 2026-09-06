@@ -434,6 +434,109 @@ JNIEXPORT jlongArray JNICALL Java_com_madras_MadrasNative_nativeLookupRowIds(
     return result;
 }
 
+/* ---------------------------------------------------------
+   Range lookup: lowerValue is required (seeds find_first); upperValue may
+   be null for an open-ended lower-bounded range (col > x / col >= x with no
+   upper limit). An open-ended UPPER-bounded-only range (col < x with no
+   lower limit) is NOT supported here -- there's no proven way to seek to
+   "the very beginning of the trie's key space" with this API, so that case
+   is left for the caller to handle via a full scan + client-side filter.
+--------------------------------------------------------- */
+
+static int CompareKeyPrefix(const uint8_t *a, size_t alen, const uint8_t *b, size_t blen) {
+    size_t n = std::min(alen, blen);
+    int c = memcmp(a, b, n);
+    if (c != 0) return c;
+    if (alen == blen) return 0;
+    return alen < blen ? -1 : 1;
+}
+
+JNIEXPORT jlongArray JNICALL Java_com_madras_MadrasNative_nativeRangeLookupRowIds(
+        JNIEnv *env, jclass, jlong handle_ptr, jint col_idx,
+        jstring jlower_value, jboolean lower_inclusive,
+        jstring jupper_value, jboolean upper_inclusive) {
+    auto *h = AsHandle(handle_ptr);
+    static_trie_map *stm = h->stm.get();
+    std::string lower_value = JStringToStd(env, jlower_value);
+    bool has_upper = (jupper_value != nullptr);
+    std::string upper_value = has_upper ? JStringToStd(env, jupper_value) : std::string();
+
+    char col_enc = stm->get_column_encoding((uint32_t) col_idx);
+    char data_type = stm->get_column_type((uint32_t) col_idx);
+    std::vector<uint64_t> row_ids;
+
+    if (col_enc == 'W') {
+        ThrowJavaException(env, "Range lookups are not supported on word/phrase-indexed ('W') columns");
+        return env->NewLongArray(0);
+    }
+
+    static_trie_map *trie_map = stm;
+    bool is_col_trie = false;
+    if ((uint32_t) col_idx >= stm->get_pk_col_count() && col_enc == 'T') {
+        trie_map = stm->get_col_trie_map((uint32_t) col_idx);
+        if (!trie_map) {
+            ThrowJavaException(env, "get_col_trie_map returned null");
+            return env->NewLongArray(0);
+        }
+        is_col_trie = true;
+    }
+
+    size_t max_len = stm->get_max_key_len();
+    uintxx_t vmax = stm->get_max_val_len((uint32_t) col_idx);
+    if (vmax > max_len) max_len = vmax;
+    if (is_col_trie) {
+        size_t ctm = trie_map->get_max_key_len();
+        if (ctm + 1 > max_len) max_len = ctm + 1;
+    }
+
+    std::vector<uint8_t> lower_key(max_len);
+    uint32_t lower_key_len = 0;
+    ConvertValueToKey(lower_value, data_type, lower_key.data(), lower_key_len);
+
+    std::vector<uint8_t> upper_key(max_len);
+    uint32_t upper_key_len = 0;
+    if (has_upper) {
+        ConvertValueToKey(upper_value, data_type, upper_key.data(), upper_key_len);
+    }
+
+    iter_ctx it_ctx;
+    it_ctx.init(trie_map->get_max_key_len(), trie_map->get_max_level());
+    std::vector<uint8_t> out_key_buf(max_len);
+    trie_map->find_first(lower_key.data(), lower_key_len, it_ctx, true);
+    int out_key_len = trie_map->next(it_ctx, out_key_buf.data());
+
+    while (out_key_len != -2) {
+        int cmp_lower = CompareKeyPrefix(out_key_buf.data(), (size_t) out_key_len, lower_key.data(), lower_key_len);
+        bool pass_lower = lower_inclusive ? (cmp_lower >= 0) : (cmp_lower > 0);
+
+        bool pass_upper = true;
+        if (has_upper) {
+            int cmp_upper = CompareKeyPrefix(out_key_buf.data(), (size_t) out_key_len, upper_key.data(), upper_key_len);
+            pass_upper = upper_inclusive ? (cmp_upper <= 0) : (cmp_upper < 0);
+            if (!pass_upper) break; // sorted iteration: once past the upper bound, nothing further can match
+        }
+
+        if (pass_lower && pass_upper) {
+            uintxx_t row_id = trie_map->leaf_rank1(it_ctx.node_path[it_ctx.cur_idx]);
+            if (is_col_trie) {
+                struct ctx_t { std::vector<uint64_t> *ids; } rcc { &row_ids };
+                auto cb = [](void *c, uintxx_t rid) -> bool {
+                    ((ctx_t *) c)->ids->push_back(rid);
+                    return false;
+                };
+                static_trie_map::emit_rev_rids(trie_map, row_id, cb, &rcc);
+            } else {
+                row_ids.push_back(row_id);
+            }
+        }
+        out_key_len = trie_map->next(it_ctx, out_key_buf.data());
+    }
+
+    jlongArray result = env->NewLongArray((jsize) row_ids.size());
+    env->SetLongArrayRegion(result, 0, (jsize) row_ids.size(), (const jlong *) row_ids.data());
+    return result;
+}
+
 /* ===========================================================
    Write path (madras::dv1::builder), for Spark CTAS / DataFrameWriter.
    Mirrors the Python madras_builder_pybind.cpp bindings exactly, just via

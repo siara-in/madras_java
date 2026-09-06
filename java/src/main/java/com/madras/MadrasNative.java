@@ -139,6 +139,17 @@ final class MadrasNative {
     /** Exact-key or word/phrase lookup -> matching row ids. */
     static native long[] nativeLookupRowIds(long handle, int colIdx, String value);
 
+    /**
+     * Range lookup. lowerValue is required; upperValue may be null for an
+     * open-ended lower-bounded range (col > x / col >= x with no upper
+     * limit). An open-ended UPPER-only range (col < x, no lower bound) is
+     * NOT supported here -- callers must fall back to a full scan +
+     * client-side filter for that case.
+     */
+    static native long[] nativeRangeLookupRowIds(long handle, int colIdx,
+                                                  String lowerValue, boolean lowerInclusive,
+                                                  String upperValue, boolean upperInclusive);
+
     /** Fetches specific row ids -- same Object[] shape as nativeGetColumns. */
     static native Object[] nativeGetColumnsByIds(long handle, long[] rowIds, int[] colIndices);
 

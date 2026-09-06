@@ -81,6 +81,22 @@ public final class MadrasReader implements Closeable {
      * ('S'-typed) columns, matching the read_madras table function's
      * default projection.
      */
+    /**
+     * True if this column can be looked up via lookupRowIds/rangeLookupRowIds
+     * (PK columns, 'T'-encoded trie columns, or 'W'-encoded word columns).
+     * Range lookups on 'W' columns are not supported (word/phrase search is
+     * exact-value only) -- see isRangeable().
+     */
+    public boolean isIndexable(int colIdx) {
+        ColumnMeta c = metadata.columns.get(colIdx);
+        return c.encoding == 'T' || c.encoding == 'W' || colIdx < metadata.pkColumns;
+    }
+
+    public boolean isRangeable(int colIdx) {
+        ColumnMeta c = metadata.columns.get(colIdx);
+        return c.encoding != 'W' && isIndexable(colIdx);
+    }
+
     public int[] dataColumnIndices() {
         List<Integer> out = new ArrayList<>();
         for (ColumnMeta c : metadata.columns) {
@@ -109,18 +125,68 @@ public final class MadrasReader implements Closeable {
      */
     public long[] lookupRowIds(String column, String value) {
         checkOpen();
-        return MadrasNative.nativeLookupRowIds(handle, columnIndex(column), value);
+        long[] result = MadrasNative.nativeLookupRowIds(handle, columnIndex(column), value);
+        System.err.println("Using index: " + column + " = " + value + " -- index pass: " + result.length);
+        return result;
     }
 
     public long[] lookupRowIds(int colIdx, String value) {
         checkOpen();
-        return MadrasNative.nativeLookupRowIds(handle, colIdx, value);
+        long[] result = MadrasNative.nativeLookupRowIds(handle, colIdx, value);
+        System.err.println("Using index: col#" + colIdx + " = " + value + " -- index pass: " + result.length);
+        return result;
     }
 
     /** Fetches specific row ids -- same Object[] shape as getColumns(). */
     public Object[] getColumnsByIds(long[] rowIds, int[] colIndices) {
         checkOpen();
         return MadrasNative.nativeGetColumnsByIds(handle, rowIds, colIndices);
+    }
+
+    /**
+     * IN (v1, v2, ...) lookup: unions row ids matching any of the given
+     * values, deduplicated. Each value is looked up via the same exact-match
+     * path as a single equality lookup.
+     */
+    public long[] lookupInRowIds(String column, java.util.List<String> values) {
+        return lookupInRowIds(columnIndex(column), values);
+    }
+
+    public long[] lookupInRowIds(int colIdx, java.util.List<String> values) {
+        checkOpen();
+        java.util.LinkedHashSet<Long> all = new java.util.LinkedHashSet<>();
+        for (String v : values) {
+            for (long id : MadrasNative.nativeLookupRowIds(handle, colIdx, v)) {
+                all.add(id);
+            }
+        }
+        long[] result = new long[all.size()];
+        int i = 0;
+        for (long id : all) result[i++] = id;
+        System.err.println("Using index: col#" + colIdx + " IN " + values + " -- index pass: " + result.length);
+        return result;
+    }
+
+    /**
+     * Range lookup, e.g. col BETWEEN a AND b, or col > x (upperValue = null
+     * for an open-ended upper bound). lowerValue is required -- an
+     * open-ended LOWER bound (col < x with no lower limit) isn't supported;
+     * fall back to a full scan + client-side filter for that case.
+     */
+    public long[] rangeLookupRowIds(String column, String lowerValue, boolean lowerInclusive,
+                                     String upperValue, boolean upperInclusive) {
+        return rangeLookupRowIds(columnIndex(column), lowerValue, lowerInclusive, upperValue, upperInclusive);
+    }
+
+    public long[] rangeLookupRowIds(int colIdx, String lowerValue, boolean lowerInclusive,
+                                     String upperValue, boolean upperInclusive) {
+        checkOpen();
+        long[] result = MadrasNative.nativeRangeLookupRowIds(handle, colIdx, lowerValue, lowerInclusive,
+                                                     upperValue, upperInclusive);
+        System.err.println("Using index: col#" + colIdx + " range [" + lowerValue + (lowerInclusive ? "<=" : "<")
+                + " x " + (upperInclusive ? "<=" : "<") + (upperValue == null ? "\u221e" : upperValue)
+                + "] -- index pass: " + result.length);
+        return result;
     }
 
     private void checkOpen() {

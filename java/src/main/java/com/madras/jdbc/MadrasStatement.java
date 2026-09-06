@@ -44,33 +44,132 @@ public final class MadrasStatement implements java.sql.Statement {
         }
 
         long[] rowIds;
-        Object[] columnar;
-        if (q.whereColumn != null) {
-            rowIds = reader.lookupRowIds(q.whereColumn, q.whereValue);
-            if (q.limit != null && rowIds.length > q.limit) {
-                rowIds = java.util.Arrays.copyOf(rowIds, q.limit.intValue());
-            }
-            columnar = reader.getColumnsByIds(rowIds, colIndices);
-        } else {
-            long count = q.limit != null ? q.limit : -1L;
-            columnar = reader.getColumns(0, count, colIndices);
-            long n = columnLength(columnar[0]);
-            rowIds = new long[(int) n];
-            for (int i = 0; i < n; i++) rowIds[i] = i;
-        }
+        boolean needsClientFilter = false;
 
-        int nRows = rowIds.length;
-        Object[][] rowMajor = new Object[nRows][colIndices.length];
-        for (int c = 0; c < colIndices.length; c++) {
-            Object col = columnar[c];
-            for (int r = 0; r < nRows; r++) {
-                rowMajor[r][c] = extractValue(col, r);
+        if (q.whereColumn == null) {
+            rowIds = fullRange(reader, effectiveLimit(q.limit));
+        } else {
+            int whereColIdx = reader.columnIndex(q.whereColumn);
+            boolean indexable = reader.isIndexable(whereColIdx);
+            boolean rangeable = reader.isRangeable(whereColIdx);
+
+            switch (q.whereOp) {
+                case EQ:
+                    rowIds = indexable ? reader.lookupRowIds(whereColIdx, q.whereValues.get(0))
+                                        : fullScanThenFilter(reader, q, whereColIdx);
+                    break;
+                case IN:
+                    rowIds = indexable ? reader.lookupInRowIds(whereColIdx, q.whereValues)
+                                        : fullScanThenFilter(reader, q, whereColIdx);
+                    break;
+                case BETWEEN:
+                    rowIds = rangeable
+                            ? reader.rangeLookupRowIds(whereColIdx, q.whereValues.get(0), true, q.whereValues.get(1), true)
+                            : fullScanThenFilter(reader, q, whereColIdx);
+                    break;
+                case GT:
+                    rowIds = rangeable ? reader.rangeLookupRowIds(whereColIdx, q.whereValues.get(0), false, null, false)
+                                        : fullScanThenFilter(reader, q, whereColIdx);
+                    break;
+                case GTE:
+                    rowIds = rangeable ? reader.rangeLookupRowIds(whereColIdx, q.whereValues.get(0), true, null, false)
+                                        : fullScanThenFilter(reader, q, whereColIdx);
+                    break;
+                case LT:
+                case LTE:
+                    // Open-ended LOWER bound (col < x / col <= x, no lower limit) isn't
+                    // supported by the native range lookup -- always falls back.
+                    rowIds = fullScanThenFilter(reader, q, whereColIdx);
+                    break;
+                default:
+                    throw new java.sql.SQLException("Unhandled WHERE operator: " + q.whereOp);
+            }
+
+            Long cap = effectiveLimit(q.limit);
+            if (cap != null && rowIds.length > cap) {
+                rowIds = java.util.Arrays.copyOf(rowIds, cap.intValue());
             }
         }
 
         MadrasResultSetMetaData md = new MadrasResultSetMetaData(columnNames, mstTypes);
-        this.currentResultSet = new MadrasResultSet(columnNames, rowMajor, rowIds, md);
+        this.currentResultSet = new MadrasResultSet(reader, columnNames, colIndices, rowIds, md);
         return this.currentResultSet;
+    }
+
+    /**
+     * Combines the SQL LIMIT clause (if any) with Statement.setMaxRows()
+     * (if set via the standard JDBC API, which many clients -- including
+     * DBeaver's Data tab -- use to cap preview/page size instead of adding
+     * LIMIT to the SQL text). Whichever is smaller wins. Returns null if
+     * neither is set (no cap).
+     */
+    private Long effectiveLimit(Long sqlLimit) {
+        Long cap = sqlLimit;
+        if (maxRows > 0) {
+            cap = (cap == null) ? (long) maxRows : Math.min(cap, maxRows);
+        }
+        return cap;
+    }
+
+    private static long[] fullRange(MadrasReader reader, Long limit) {
+        long total = reader.metadata().rows;
+        long n = limit != null ? Math.min(limit, total) : total;
+        long[] ids = new long[(int) n];
+        for (int i = 0; i < n; i++) ids[i] = i;
+        return ids;
+    }
+
+    /**
+     * Client-side fallback: full scan of the WHERE column, comparing each
+     * row's value in Java. Used whenever the condition can't be pushed to
+     * the native index (non-indexable column, or an open-ended lower-bound
+     * range) -- correctness is preserved, just without acceleration.
+     */
+    private static long[] fullScanThenFilter(MadrasReader reader, MiniSqlParser.ParsedQuery q, int whereColIdx)
+            throws java.sql.SQLException {
+        long total = reader.metadata().rows;
+        int[] singleCol = new int[]{whereColIdx};
+        Object[] colData = reader.getColumns(0, -1, singleCol);
+        Object col = colData[0];
+
+        java.util.List<Long> matched = new java.util.ArrayList<>();
+        for (long i = 0; i < total; i++) {
+            Object v = extractValue(col, (int) i);
+            if (v != null && matchesCondition(v, q)) {
+                matched.add(i);
+            }
+        }
+        long[] ids = new long[matched.size()];
+        for (int i = 0; i < ids.length; i++) ids[i] = matched.get(i);
+        return ids;
+    }
+
+    private static boolean matchesCondition(Object value, MiniSqlParser.ParsedQuery q) {
+        switch (q.whereOp) {
+            case EQ:
+                return String.valueOf(value).equals(q.whereValues.get(0));
+            case IN:
+                for (String v : q.whereValues) if (String.valueOf(value).equals(v)) return true;
+                return false;
+            case BETWEEN: {
+                double d = toDouble(value);
+                return d >= Double.parseDouble(q.whereValues.get(0)) && d <= Double.parseDouble(q.whereValues.get(1));
+            }
+            case GT: return toDouble(value) > Double.parseDouble(q.whereValues.get(0));
+            case GTE: return toDouble(value) >= Double.parseDouble(q.whereValues.get(0));
+            case LT: return toDouble(value) < Double.parseDouble(q.whereValues.get(0));
+            case LTE: return toDouble(value) <= Double.parseDouble(q.whereValues.get(0));
+            default: return false;
+        }
+    }
+
+    private static double toDouble(Object v) {
+        if (v instanceof Number) return ((Number) v).doubleValue();
+        try {
+            return Double.parseDouble(String.valueOf(v));
+        } catch (NumberFormatException e) {
+            return Double.NaN;
+        }
     }
 
     private static long columnLength(Object col) {

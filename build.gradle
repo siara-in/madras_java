@@ -25,14 +25,29 @@ java {
     targetCompatibility = JavaVersion.VERSION_1_8
 }
 
-dependencies {
-    // Spark is a "provided"-style dependency -- the connector runs inside a
-    // Spark process, which already has these on its classpath. Adjust the
-    // version to match your target Spark's Scala build (2.12 vs 2.13).
-    compileOnly 'org.apache.spark:spark-sql_2.12:3.5.1'
-    compileOnly 'org.apache.spark:spark-catalyst_2.12:3.5.1'
+// --------------------------------------------------------------------
+// Spark dependencies: resolved from a LOCAL jars/ directory, not Maven
+// coordinates. This build was verified against a Spark distribution
+// (3.5.9) that is not a standard Apache release -- its module split
+// (spark-sql-api, kryo-shaded as separate jars) means the matching
+// `org.apache.spark:spark-sql_2.12:3.5.9`-style Maven coordinate almost
+// certainly doesn't exist on Maven Central. Pointing straight at your
+// actual $SPARK_HOME/jars avoids ever needing that artifact to be
+// published anywhere -- set SPARK_HOME as an environment variable or
+// pass -PsparkHome=/path/to/spark when invoking gradle.
+// --------------------------------------------------------------------
+def sparkHome = project.hasProperty('sparkHome') ? project.property('sparkHome') : System.getenv('SPARK_HOME')
+if (sparkHome == null) {
+    throw new GradleException(
+        "Set SPARK_HOME (env var) or pass -PsparkHome=/path/to/spark so Gradle can find your Spark jars/ directory.")
+}
 
-    testImplementation 'org.apache.spark:spark-sql_2.12:3.5.1'
+dependencies {
+    // compileOnly: these are provided by the Spark runtime at execution
+    // time, not bundled into our jar.
+    compileOnly fileTree(dir: "${sparkHome}/jars", include: '*.jar')
+
+    testImplementation fileTree(dir: "${sparkHome}/jars", include: '*.jar')
     testImplementation 'org.junit.jupiter:junit-jupiter:5.10.0'
 }
 
@@ -46,10 +61,16 @@ test {
 // resources/natives/<os-arch>/ tree, matching MadrasNative.java's lookup
 // path. Run the native CMake build for each target platform first (see
 // README), placing outputs under native/build-out/<os-arch>/ before
-// running `./gradlew jar`.
+// running `gradle jar`.
 // --------------------------------------------------------------------
 processResources {
     from('native/build-out') {
         into 'natives'
     }
 }
+
+// `gradle jar` (the standard java-library task) now does everything in one
+// shot: compiles java/src/main/java, copies java/src/main/resources AND
+// native/build-out/* (via processResources above) into the jar, and
+// produces build/libs/madras-jvm-0.1.0.jar.
+

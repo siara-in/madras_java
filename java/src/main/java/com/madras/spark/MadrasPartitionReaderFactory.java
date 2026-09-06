@@ -15,7 +15,11 @@ class MadrasPartitionReaderFactory implements PartitionReaderFactory {
 
     @Override
     public PartitionReader<InternalRow> createReader(InputPartition partition) {
-        MadrasInputPartition p = (MadrasInputPartition) partition;
+        if (partition instanceof MadrasRowIdsInputPartition) {
+            MadrasRowIdsInputPartition p = (MadrasRowIdsInputPartition) partition;
+            return new MadrasRowIdsPartitionReader(p.path, p.rowIds, schema);
+        }
+        MadrasRangeInputPartition p = (MadrasRangeInputPartition) partition;
         return new MadrasPartitionReader(p.path, p.offset, p.count, schema);
     }
 }

@@ -13,7 +13,10 @@ public final class MadrasConnection implements java.sql.Connection {
     private final MadrasReader reader;
     private boolean closed = false;
 
+    private final String path;
+
     MadrasConnection(String path) throws java.sql.SQLException {
+        this.path = path;
         try {
             this.reader = new MadrasReader(path);
         } catch (RuntimeException e) {
@@ -44,11 +47,7 @@ public final class MadrasConnection implements java.sql.Connection {
 
     @Override
     public java.sql.DatabaseMetaData getMetaData() throws java.sql.SQLException {
-        // DatabaseMetaData is a ~150-method interface (driver/catalog
-        // introspection, supported-feature flags, etc.) -- out of scope for
-        // this pass. Add a real implementation if a client (e.g. a BI tool)
-        // needs catalog browsing rather than just running SELECTs.
-        throw new java.sql.SQLFeatureNotSupportedException("getMetaData (DatabaseMetaData)");
+        return new MadrasDatabaseMetaData(this, reader, path);
     }
 
     @Override
