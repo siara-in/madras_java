@@ -1,8 +1,11 @@
 package com.madras.spark;
 
 import com.madras.MadrasReader;
+import org.apache.spark.sql.connector.expressions.aggregate.Aggregation;
+import org.apache.spark.sql.connector.expressions.aggregate.CountStar;
 import org.apache.spark.sql.connector.read.Scan;
 import org.apache.spark.sql.connector.read.ScanBuilder;
+import org.apache.spark.sql.connector.read.SupportsPushDownAggregates;
 import org.apache.spark.sql.connector.read.SupportsPushDownFilters;
 import org.apache.spark.sql.connector.read.SupportsPushDownRequiredColumns;
 import org.apache.spark.sql.sources.And;
@@ -32,17 +35,60 @@ import java.util.List;
  * here, matching MadrasReader.isIndexable()/isRangeable() -- any known
  * discrepancy in the underlying trie library's range-seek behavior on PK
  * columns is out of scope for this layer to work around.
+ *
+ * Also implements SupportsPushDownAggregates for a bare COUNT(*) with no
+ * GROUP BY -- answered directly from trie metadata (or from a pushed
+ * filter's matched-row-id count), no scan at all. This is Spark's own,
+ * idiomatic mechanism for exactly the optimization our Calcite JDBC driver
+ * turned out not to get for free (confirmed by direct measurement: bare
+ * COUNT(*) through Calcite fetched every column for every row). Aggregates
+ * other than a bare COUNT(*) (SUM/AVG/MIN/MAX, or any GROUP BY) are left
+ * unpushed for Spark's own execution -- real, separate follow-up work.
  */
-class MadrasScanBuilder implements ScanBuilder, SupportsPushDownRequiredColumns, SupportsPushDownFilters {
+class MadrasScanBuilder implements ScanBuilder, SupportsPushDownRequiredColumns, SupportsPushDownFilters,
+        SupportsPushDownAggregates {
 
+    private boolean countStarPushed = false;
+
+    @Override
+    public boolean supportCompletePushDown(Aggregation aggregation) {
+        return isBareCountStar(aggregation);
+    }
+
+    @Override
+    public boolean pushAggregation(Aggregation aggregation) {
+        if (!isBareCountStar(aggregation)) return false;
+        countStarPushed = true;
+        // Spark expects the Scan's schema to match the pushed aggregate's
+        // output once supportCompletePushDown/pushAggregation succeed --
+        // replace the (possibly already-pruned) table schema with a single
+        // count column.
+        this.schema = new StructType(new org.apache.spark.sql.types.StructField[]{
+                new org.apache.spark.sql.types.StructField("count(1)",
+                        org.apache.spark.sql.types.DataTypes.LongType, false,
+                        org.apache.spark.sql.types.Metadata.empty())
+        });
+        return true;
+    }
+
+    private static boolean isBareCountStar(Aggregation aggregation) {
+        return aggregation.groupByExpressions().length == 0
+                && aggregation.aggregateExpressions().length == 1
+                && aggregation.aggregateExpressions()[0] instanceof CountStar;
+    }
+
+    private final MadrasTable table;
     private final String path;
     private StructType schema;
+    private final MadrasOptions options;
     private PushedCondition pushed; // null if nothing was pushed
     private Filter[] remainingFilters = new Filter[0];
 
-    MadrasScanBuilder(String path, StructType schema) {
-        this.path = path;
-        this.schema = schema;
+    MadrasScanBuilder(MadrasTable table) {
+        this.table = table;
+        this.path = table.path();
+        this.schema = table.schema();
+        this.options = table.options();
     }
 
     @Override
@@ -52,6 +98,13 @@ class MadrasScanBuilder implements ScanBuilder, SupportsPushDownRequiredColumns,
 
     @Override
     public Filter[] pushFilters(Filter[] filters) {
+        // no_index: mirrors the DuckDB extension's no_index=true -- disable
+        // pushdown entirely, always full scan + Spark's own post-scan filter.
+        if (options.noIndex) {
+            remainingFilters = filters;
+            return filters;
+        }
+
         // IMPORTANT: Spark hands this a FLAT, already-split array -- a
         // BETWEEN/two-sided range arrives as two separate top-level entries
         // (e.g. GreaterThanOrEqual + LessThanOrEqual), not one And(...)
@@ -228,16 +281,22 @@ class MadrasScanBuilder implements ScanBuilder, SupportsPushDownRequiredColumns,
     }
 
     private boolean isIndexable(String columnName) {
-        try (MadrasReader reader = new MadrasReader(path)) {
-            return reader.isIndexable(reader.columnIndex(columnName));
+        try {
+            MadrasReader reader = table.metaReader();
+            int idx = reader.columnIndex(columnName);
+            if (options.forcedIndex != null && options.forcedIndex != idx) return false;
+            return reader.isIndexable(idx);
         } catch (RuntimeException e) {
             return false;
         }
     }
 
     private boolean isRangeable(String columnName) {
-        try (MadrasReader reader = new MadrasReader(path)) {
-            return reader.isRangeable(reader.columnIndex(columnName));
+        try {
+            MadrasReader reader = table.metaReader();
+            int idx = reader.columnIndex(columnName);
+            if (options.forcedIndex != null && options.forcedIndex != idx) return false;
+            return reader.isRangeable(idx);
         } catch (RuntimeException e) {
             return false;
         }
@@ -254,7 +313,7 @@ class MadrasScanBuilder implements ScanBuilder, SupportsPushDownRequiredColumns,
     @Override
     public Scan build() {
         if (cachedScan == null) {
-            cachedScan = new MadrasScan(path, schema, pushed);
+            cachedScan = new MadrasScan(table, schema, pushed, options, countStarPushed);
         }
         return cachedScan;
     }

@@ -1,37 +1,39 @@
-package com.madras.jdbc;
+package com.madras.sql;
 
 import com.madras.MadrasReader;
 
 /**
- * One .mdsi file per Connection. Read-only: setAutoCommit(false)/commit()/
- * rollback() throw, since there's no write/transaction concept for this
- * source. getMetaData() (java.sql.DatabaseMetaData, catalog introspection)
- * is out of scope for this pass -- see the method body for why.
+ * One .mdsi file per Connection, backed by the native madras_sql engine.
+ * Read-only, no transaction support -- same scope as com.madras.calcite's
+ * connection wrapper (before it was removed).
  */
-public final class MadrasConnection implements java.sql.Connection {
+public final class MadrasSqlConnection implements java.sql.Connection {
 
-    private final MadrasReader reader;
+    private final MadrasSqlEngine engine;
+    private final MadrasReader metaReader; // for DatabaseMetaData only -- reuses the already-proven MadrasReader
+                                             // rather than adding new native surface just for catalog browsing
+    private final String path;
     private boolean closed = false;
 
-    private final String path;
-
-    MadrasConnection(String path) throws java.sql.SQLException {
+    MadrasSqlConnection(String path) throws java.sql.SQLException {
         this.path = path;
         try {
-            this.reader = new MadrasReader(path);
+            this.engine = new MadrasSqlEngine(path);
+            this.metaReader = new MadrasReader(path);
         } catch (RuntimeException e) {
             throw new java.sql.SQLException("Failed to open " + path, e);
         }
     }
 
-    MadrasReader reader() {
-        return reader;
+    MadrasSqlEngine engine() {
+        return engine;
     }
 
     @Override
     public void close() throws java.sql.SQLException {
         closed = true;
-        reader.close();
+        engine.close();
+        metaReader.close();
     }
 
     @Override
@@ -42,12 +44,12 @@ public final class MadrasConnection implements java.sql.Connection {
     @Override
     public java.sql.Statement createStatement() throws java.sql.SQLException {
         if (closed) throw new java.sql.SQLException("Connection is closed");
-        return new MadrasStatement(this);
+        return new MadrasSqlStatement(this);
     }
 
     @Override
     public java.sql.DatabaseMetaData getMetaData() throws java.sql.SQLException {
-        return new MadrasDatabaseMetaData(this, reader, path);
+        return new MadrasSqlDatabaseMetaData(this, metaReader, path);
     }
 
     @Override
@@ -62,7 +64,7 @@ public final class MadrasConnection implements java.sql.Connection {
 
     @Override
     public void clearWarnings() throws java.sql.SQLException {
-        // no-op -- no warnings are ever generated
+        // no-op
     }
 
     @Override
@@ -87,9 +89,45 @@ public final class MadrasConnection implements java.sql.Connection {
     public void rollback() throws java.sql.SQLException {
         throw new java.sql.SQLFeatureNotSupportedException("Transactions are not supported");
     }
+
+    @Override
+    public <T> T unwrap(java.lang.Class<T> iface) throws java.sql.SQLException {
+        if (iface.isInstance(this)) return iface.cast(this);
+        throw new java.sql.SQLException("Not a wrapper for " + iface);
+    }
+
+    @Override
+    public boolean isWrapperFor(java.lang.Class<?> iface) throws java.sql.SQLException {
+        return iface.isInstance(this);
+    }
+
+    @Override
+    public java.sql.Statement createStatement(int arg0, int arg1) throws java.sql.SQLException {
+        throw new java.sql.SQLFeatureNotSupportedException("createStatement(int,int)");
+    }
+
+    @Override
+    public java.sql.Statement createStatement(int arg0, int arg1, int arg2) throws java.sql.SQLException {
+        throw new java.sql.SQLFeatureNotSupportedException("createStatement(int,int,int)");
+    }
+
+    @Override
+    public void rollback(java.sql.Savepoint arg0) throws java.sql.SQLException {
+        throw new java.sql.SQLFeatureNotSupportedException("rollback(Savepoint)");
+    }
+
+    @Override
+    public void setClientInfo(java.lang.String arg0, java.lang.String arg1) throws java.sql.SQLClientInfoException {
+        throw new java.sql.SQLClientInfoException("setClientInfo not supported", new java.util.HashMap<>());
+    }
+
+    @Override
+    public void setClientInfo(java.util.Properties arg0) throws java.sql.SQLClientInfoException {
+        throw new java.sql.SQLClientInfoException("setClientInfo not supported", new java.util.HashMap<>());
+    }
     @Override
     public java.sql.PreparedStatement prepareStatement(java.lang.String arg0) throws java.sql.SQLException {
-        throw new java.sql.SQLFeatureNotSupportedException("prepareStatement");
+        return new MadrasSqlPreparedStatement(this, arg0);
     }
 
     @Override
@@ -223,16 +261,6 @@ public final class MadrasConnection implements java.sql.Connection {
     }
 
     @Override
-    public void setClientInfo(java.lang.String arg0, java.lang.String arg1) throws java.sql.SQLClientInfoException {
-        throw new java.sql.SQLClientInfoException("setClientInfo not supported", new java.util.HashMap<>());
-    }
-
-    @Override
-    public void setClientInfo(java.util.Properties arg0) throws java.sql.SQLClientInfoException {
-        throw new java.sql.SQLClientInfoException("setClientInfo not supported", new java.util.HashMap<>());
-    }
-
-    @Override
     public java.lang.String getClientInfo(java.lang.String arg0) throws java.sql.SQLException {
         throw new java.sql.SQLFeatureNotSupportedException("getClientInfo");
     }
@@ -307,30 +335,4 @@ public final class MadrasConnection implements java.sql.Connection {
         throw new java.sql.SQLFeatureNotSupportedException("setShardingKey");
     }
 
-
-    @Override
-    public java.sql.Statement createStatement(int resultSetType, int resultSetConcurrency) throws java.sql.SQLException {
-        throw new java.sql.SQLFeatureNotSupportedException("createStatement(int,int)");
-    }
-
-    @Override
-    public java.sql.Statement createStatement(int resultSetType, int resultSetConcurrency, int resultSetHoldability) throws java.sql.SQLException {
-        throw new java.sql.SQLFeatureNotSupportedException("createStatement(int,int,int)");
-    }
-
-    @Override
-    public void rollback(java.sql.Savepoint savepoint) throws java.sql.SQLException {
-        throw new java.sql.SQLFeatureNotSupportedException("rollback(Savepoint)");
-    }
-
-    @Override
-    public <T> T unwrap(java.lang.Class<T> iface) throws java.sql.SQLException {
-        if (iface.isInstance(this)) return iface.cast(this);
-        throw new java.sql.SQLException("Not a wrapper for " + iface);
-    }
-
-    @Override
-    public boolean isWrapperFor(java.lang.Class<?> iface) throws java.sql.SQLException {
-        return iface.isInstance(this);
-    }
 }

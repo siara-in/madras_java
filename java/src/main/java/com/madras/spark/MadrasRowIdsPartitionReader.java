@@ -33,8 +33,8 @@ class MadrasRowIdsPartitionReader implements PartitionReader<InternalRow> {
     private int batchLen = 0;
     private int batchPos = 0;
 
-    MadrasRowIdsPartitionReader(String path, long[] rowIds, StructType schema) {
-        this.reader = new MadrasReader(path);
+    MadrasRowIdsPartitionReader(String path, long[] rowIds, StructType schema, boolean mmap) {
+        this.reader = new MadrasReader(path, mmap);
         this.rowIds = rowIds;
 
         StructField[] fields = schema.fields();

@@ -36,11 +36,11 @@ import java.nio.file.Files;
  * src/main/jniLibs/<abi>/libmadras_jni.so per standard Android packaging,
  * and step 2 above (System.loadLibrary) picks it up automatically.
  */
-final class MadrasNative {
+public final class MadrasNative {
 
     private static volatile boolean loaded = false;
 
-    static synchronized void ensureLoaded() {
+    public static synchronized void ensureLoaded() {
         if (loaded) return;
 
         String override = System.getProperty("madras.native.path");

@@ -34,8 +34,8 @@ class MadrasPartitionReader implements PartitionReader<InternalRow> {
     private long batchLen = 0;
     private long batchPos = 0;        // position within currentBatchCols
 
-    MadrasPartitionReader(String path, long offset, long count, StructType schema) {
-        this.reader = new MadrasReader(path);
+    MadrasPartitionReader(String path, long offset, long count, StructType schema, boolean mmap) {
+        this.reader = new MadrasReader(path, mmap);
         this.partitionOffset = offset;
         this.partitionCount = count;
 

@@ -1,4 +1,4 @@
-package com.madras.jdbc;
+package com.madras.sql;
 
 import com.madras.MadrasReader;
 import java.sql.Connection;
@@ -9,33 +9,29 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * Real (not stubbed) DatabaseMetaData: JDBC client tools (DBeaver, DataGrip,
- * SQuirreL, etc.) call this routinely just to connect and browse schemas --
- * throwing SQLFeatureNotSupportedException here (as an earlier pass of this
- * driver did) breaks basic connectivity, unlike the rare Connection/
- * Statement/ResultSet methods where that's a reasonable scope boundary.
+ * Real (not stubbed) DatabaseMetaData -- JDBC client tools (DBeaver,
+ * DataGrip, SQuirreL, etc.) call this routinely just to connect and browse
+ * schemas, so throwing SQLFeatureNotSupportedException here breaks basic
+ * connectivity, not an edge case. Same lesson already learned once for the
+ * (now-removed) Calcite connection wrapper -- applied here from the start
+ * this time instead of after hitting the same error again.
  *
- * One .mdsi file is treated as exactly one table (name = the file's stem),
- * with no catalog/schema concept -- getCatalogs()/getSchemas() return empty
- * result sets, and getTables()/getColumns()/getPrimaryKeys() always
- * describe that single implicit table regardless of the catalog/schema/
- * table-name-pattern arguments passed in (a real multi-file catalog isn't
- * something this single-file connection has any way to enumerate).
- *
- * Every other method (the ~150 supportsXXX/getMaxXXX/etc. capability
- * queries, and the ResultSet-returning methods not central to basic browse
- * -- getProcedures, getIndexInfo, getImportedKeys, getUDTs, etc.) returns a
- * safe default (false/0/null/empty ResultSet) via generated stubs -- see
- * DatabaseMetaData.stubs.filtered.txt's generation in the build notes.
+ * One .mdsi file = one implicit table (name = the file's stem), no
+ * catalog/schema concept -- getCatalogs()/getSchemas() return empty result
+ * sets, getTables()/getColumns()/getPrimaryKeys() always describe that one
+ * table using real metadata from MadrasReader (real column types, not the
+ * uniform VARCHAR that MadrasSqlResultSetMetaData currently reports for
+ * actual query results -- see that class's own comment for why those
+ * differ).
  */
-public final class MadrasDatabaseMetaData implements java.sql.DatabaseMetaData {
+public final class MadrasSqlDatabaseMetaData implements java.sql.DatabaseMetaData {
 
-    private final MadrasConnection connection;
+    private final MadrasSqlConnection connection;
     private final MadrasReader reader;
     private final String path;
     private final String tableName;
 
-    MadrasDatabaseMetaData(MadrasConnection connection, MadrasReader reader, String path) {
+    MadrasSqlDatabaseMetaData(MadrasSqlConnection connection, MadrasReader reader, String path) {
         this.connection = connection;
         this.reader = reader;
         this.path = path;
@@ -44,15 +40,20 @@ public final class MadrasDatabaseMetaData implements java.sql.DatabaseMetaData {
         this.tableName = dot == -1 ? name : name.substring(0, dot);
     }
 
-    private ResultSet emptyResultSet() {
-        return buildResultSet(new String[]{"X"}, new char[]{'t'}, new Object[0][]);
+    private static ResultSet emptyResultSet() {
+        return buildResultSet(new String[]{"X"}, new Object[0][]);
     }
 
-    private static ResultSet buildResultSet(String[] colNames, char[] mstTypes, Object[][] rows) {
-        MadrasResultSetMetaData md = new MadrasResultSetMetaData(colNames, mstTypes);
-        long[] rowIds = new long[rows.length];
-        for (int i = 0; i < rowIds.length; i++) rowIds[i] = i;
-        return new MadrasResultSet(colNames, rows, rowIds, md);
+    private static ResultSet buildResultSet(String[] colNames, Object[][] rows) {
+        List<String> names = java.util.Arrays.asList(colNames);
+        List<List<String>> rowLists = new ArrayList<>();
+        for (Object[] row : rows) {
+            List<String> r = new ArrayList<>(row.length);
+            for (Object v : row) r.add(v == null ? null : String.valueOf(v));
+            rowLists.add(r);
+        }
+        MadrasSqlResultSetMetaData md = new MadrasSqlResultSetMetaData(names);
+        return new MadrasSqlResultSet(names, rowLists, md);
     }
 
     // ---------------------------------------------------------------
@@ -61,13 +62,13 @@ public final class MadrasDatabaseMetaData implements java.sql.DatabaseMetaData {
 
     @Override public String getDatabaseProductName() { return "madras"; }
     @Override public String getDatabaseProductVersion() { return "0.1.0"; }
-    @Override public String getDriverName() { return "madras JDBC Driver"; }
+    @Override public String getDriverName() { return "madras-sql JDBC Driver"; }
     @Override public String getDriverVersion() { return "0.1.0"; }
     @Override public int getDriverMajorVersion() { return 0; }
     @Override public int getDriverMinorVersion() { return 1; }
     @Override public int getJDBCMajorVersion() { return 4; }
     @Override public int getJDBCMinorVersion() { return 2; }
-    @Override public String getURL() { return "jdbc:madras:" + path; }
+    @Override public String getURL() { return "jdbc:madras-sql:" + path; }
     @Override public String getUserName() { return null; }
     @Override public boolean isReadOnly() { return true; }
     @Override public Connection getConnection() { return connection; }
@@ -92,12 +93,12 @@ public final class MadrasDatabaseMetaData implements java.sql.DatabaseMetaData {
 
     @Override
     public ResultSet getCatalogs() {
-        return buildResultSet(new String[]{"TABLE_CAT"}, new char[]{'t'}, new Object[0][]);
+        return buildResultSet(new String[]{"TABLE_CAT"}, new Object[0][]);
     }
 
     @Override
     public ResultSet getSchemas() {
-        return buildResultSet(new String[]{"TABLE_SCHEM", "TABLE_CATALOG"}, new char[]{'t', 't'}, new Object[0][]);
+        return buildResultSet(new String[]{"TABLE_SCHEM", "TABLE_CATALOG"}, new Object[0][]);
     }
 
     @Override
@@ -107,16 +108,15 @@ public final class MadrasDatabaseMetaData implements java.sql.DatabaseMetaData {
 
     @Override
     public ResultSet getTableTypes() {
-        return buildResultSet(new String[]{"TABLE_TYPE"}, new char[]{'t'}, new Object[][]{{"TABLE"}});
+        return buildResultSet(new String[]{"TABLE_TYPE"}, new Object[][]{{"TABLE"}});
     }
 
     @Override
     public ResultSet getTables(String catalog, String schemaPattern, String tableNamePattern, String[] types) {
         String[] cols = {"TABLE_CAT", "TABLE_SCHEM", "TABLE_NAME", "TABLE_TYPE", "REMARKS",
                 "TYPE_CAT", "TYPE_SCHEM", "TYPE_NAME", "SELF_REFERENCING_COL_NAME", "REF_GENERATION"};
-        char[] mst = {'t', 't', 't', 't', 't', 't', 't', 't', 't', 't'};
         Object[][] rows = {{null, null, tableName, "TABLE", null, null, null, null, null, null}};
-        return buildResultSet(cols, mst, rows);
+        return buildResultSet(cols, rows);
     }
 
     @Override
@@ -126,8 +126,6 @@ public final class MadrasDatabaseMetaData implements java.sql.DatabaseMetaData {
                 "COLUMN_DEF", "SQL_DATA_TYPE", "SQL_DATETIME_SUB", "CHAR_OCTET_LENGTH", "ORDINAL_POSITION",
                 "IS_NULLABLE", "SCOPE_CATALOG", "SCOPE_SCHEMA", "SCOPE_TABLE", "SOURCE_DATA_TYPE",
                 "IS_AUTOINCREMENT", "IS_GENERATEDCOLUMN"};
-        char[] mst = {'t', 't', 't', 't', 'i', 't', 'i', 'i', 'i', 'i', 'i', 't',
-                't', 'i', 'i', 'i', 'i', 't', 't', 't', 't', 'i', 't', 't'};
 
         List<Object[]> rows = new ArrayList<>();
         int ordinal = 1;
@@ -148,13 +146,12 @@ public final class MadrasDatabaseMetaData implements java.sql.DatabaseMetaData {
             });
             ordinal++;
         }
-        return buildResultSet(cols, mst, rows.toArray(new Object[0][]));
+        return buildResultSet(cols, rows.toArray(new Object[0][]));
     }
 
     @Override
     public ResultSet getPrimaryKeys(String catalog, String schema, String table) {
         String[] cols = {"TABLE_CAT", "TABLE_SCHEM", "TABLE_NAME", "COLUMN_NAME", "KEY_SEQ", "PK_NAME"};
-        char[] mst = {'t', 't', 't', 't', 'i', 't'};
         List<Object[]> rows = new ArrayList<>();
         int seq = 1;
         for (MadrasReader.ColumnMeta c : reader.metadata().columns) {
@@ -162,7 +159,7 @@ public final class MadrasDatabaseMetaData implements java.sql.DatabaseMetaData {
             rows.add(new Object[]{null, null, tableName, c.name, seq, null});
             seq++;
         }
-        return buildResultSet(cols, mst, rows.toArray(new Object[0][]));
+        return buildResultSet(cols, rows.toArray(new Object[0][]));
     }
 
     private static int sqlTypeFor(char mstType) {
@@ -196,7 +193,6 @@ public final class MadrasDatabaseMetaData implements java.sql.DatabaseMetaData {
             default: return "TEXT";
         }
     }
-
 
     @Override
     public <T> T unwrap(Class<T> iface) throws SQLException {

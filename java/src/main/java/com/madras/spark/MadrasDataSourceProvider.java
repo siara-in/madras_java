@@ -26,7 +26,8 @@ public class MadrasDataSourceProvider implements TableProvider, DataSourceRegist
     @Override
     public StructType inferSchema(CaseInsensitiveStringMap options) {
         String path = requirePath(options);
-        return MadrasSchemaUtil.inferSchema(path);
+        boolean mmap = !"false".equalsIgnoreCase(options.get("mmap"));
+        return MadrasSchemaUtil.inferSchema(path, mmap);
     }
 
     @Override
@@ -35,7 +36,8 @@ public class MadrasDataSourceProvider implements TableProvider, DataSourceRegist
         if (path == null) {
             throw new IllegalArgumentException("madras source requires a 'path' option (the .mdsi file)");
         }
-        return new MadrasTable(path, schema);
+        MadrasOptions options = MadrasOptions.parse(properties);
+        return new MadrasTable(path, schema, options);
     }
 
     @Override

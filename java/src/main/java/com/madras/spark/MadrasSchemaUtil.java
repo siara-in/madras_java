@@ -16,7 +16,11 @@ final class MadrasSchemaUtil {
     private MadrasSchemaUtil() {}
 
     static StructType inferSchema(String path) {
-        try (MadrasReader reader = new MadrasReader(path)) {
+        return inferSchema(path, true);
+    }
+
+    static StructType inferSchema(String path, boolean mmap) {
+        try (MadrasReader reader = new MadrasReader(path, mmap)) {
             MadrasReader.Metadata meta = reader.metadata();
             StructField[] fields = new StructField[meta.columns.size() == 0 ? 0
                     : countDataColumns(reader)];

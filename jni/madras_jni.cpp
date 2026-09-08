@@ -49,6 +49,29 @@ static void ThrowJavaException(JNIEnv *env, const char *msg) {
     if (cls != nullptr) env->ThrowNew(cls, msg);
 }
 
+// Constructs a jstring directly from a length-prefixed buffer, without an
+// intermediate heap-allocated std::string just to null-terminate for
+// NewStringUTF. Uses a fixed stack buffer for the common case (short text
+// values -- city names, codes, timezones, etc.) and falls back to a heap
+// buffer only for unusually long values (e.g. a long "alternatenames" list).
+// This was a real, measured bottleneck: for a 19-column/13-text-column
+// table, fetching 200 rows previously took 400ms+ in Java, largely due to
+// this exact double-copy (std::string heap alloc + NewStringUTF's own
+// internal copy) repeated ~2600 times per query.
+static jstring MakeJString(JNIEnv *env, const char *data, uint32_t length) {
+    static const uint32_t STACK_BUF_SIZE = 4096;
+    if (length < STACK_BUF_SIZE) {
+        char buf[STACK_BUF_SIZE];
+        memcpy(buf, data, length);
+        buf[length] = '\0';
+        return env->NewStringUTF(buf);
+    }
+    std::vector<char> buf(length + 1);
+    memcpy(buf.data(), data, length);
+    buf[length] = '\0';
+    return env->NewStringUTF(buf.data());
+}
+
 static std::string JStringToStd(JNIEnv *env, jstring s) {
     const char *chars = env->GetStringUTFChars(s, nullptr);
     std::string result(chars);
@@ -178,19 +201,20 @@ JNIEXPORT jobjectArray JNICALL Java_com_madras_MadrasNative_nativeGetColumns(
 
     jclass objCls = env->FindClass("java/lang/Object");
     jobjectArray result = env->NewObjectArray(ncols, objCls, nullptr);
+    jclass strCls = env->FindClass("java/lang/String");
+    jclass byteArrCls = env->FindClass("[B");
 
     for (jsize c = 0; c < ncols; c++) {
         uint32_t col = (uint32_t) col_idx_buf[c];
         char dt = stm->get_column_type(col);
 
         if (dt == MST_TEXT) {
-            jclass strCls = env->FindClass("java/lang/String");
             jobjectArray strArr = env->NewObjectArray((jsize) n, strCls, nullptr);
             for (uint64_t i = 0; i < n; i++) {
                 col_value_ptr cv; cv.u8_ptr = scratch.data();
                 stm->get_col_val((uint64_t) offset + i, col, cv);
                 if (cv.length != UINT32_MAX) {
-                    jstring s = env->NewStringUTF(std::string((const char *) cv.u8_ptr, cv.length).c_str());
+                    jstring s = MakeJString(env, (const char *) cv.u8_ptr, cv.length);
                     env->SetObjectArrayElement(strArr, (jsize) i, s);
                     env->DeleteLocalRef(s);
                 }
@@ -199,7 +223,6 @@ JNIEXPORT jobjectArray JNICALL Java_com_madras_MadrasNative_nativeGetColumns(
             env->DeleteLocalRef(strArr);
 
         } else if (dt == MST_BIN) {
-            jclass byteArrCls = env->FindClass("[B");
             jobjectArray blobArr = env->NewObjectArray((jsize) n, byteArrCls, nullptr);
             for (uint64_t i = 0; i < n; i++) {
                 col_value_ptr cv; cv.u8_ptr = scratch.data();
@@ -217,6 +240,26 @@ JNIEXPORT jobjectArray JNICALL Java_com_madras_MadrasNative_nativeGetColumns(
         } else {
             // All numeric types -> double[], NaN = null. Java side re-casts
             // to int/long as appropriate based on the metadata type code.
+            //
+            // NOTE: a fast batch-decode path (get_block_retriever() +
+            // block_operation()/block_operation32(), mirroring the original
+            // DuckDB extension's MadrasScan) was attempted here and reverted.
+            // It requires correctly mapping the retriever's internal null
+            // bitmap layout (written in fixed-size decode blocks, seemingly
+            // ~48 rows based on the "allflic48" decoder naming) back onto a
+            // clean 64-rows-per-word bitmap -- a real crash surfaced during
+            // testing from an initial buffer-sizing mistake, and after
+            // fixing that, there wasn't enough confidence left in the exact
+            // block/word alignment to rule out silently WRONG null flags on
+            // real data (worse than the crash, since it wouldn't be visibly
+            // caught). Given this is a performance optimization, not a
+            // correctness requirement, the safe get_col_val()-per-row path
+            // below is kept as the only path until the block_retriever's
+            // exact bitmap semantics can be confirmed (ideally against
+            // documentation or the format's author, or via a rigorous test
+            // fixture with known, interspersed NULL positions to validate
+            // against) -- worth revisiting since it's the actual bottleneck
+            // for full-table scans over VINT/PFOR-encoded columns.
             jdoubleArray dblArr = env->NewDoubleArray((jsize) n);
             std::vector<jdouble> buf(n);
             for (uint64_t i = 0; i < n; i++) {
@@ -270,19 +313,20 @@ JNIEXPORT jobjectArray JNICALL Java_com_madras_MadrasNative_nativeGetColumnsById
 
     jclass objCls = env->FindClass("java/lang/Object");
     jobjectArray result = env->NewObjectArray(ncols, objCls, nullptr);
+    jclass strCls = env->FindClass("java/lang/String");
+    jclass byteArrCls = env->FindClass("[B");
 
     for (jsize c = 0; c < ncols; c++) {
         uint32_t col = (uint32_t) col_idx_buf[c];
         char dt = stm->get_column_type(col);
 
         if (dt == MST_TEXT) {
-            jclass strCls = env->FindClass("java/lang/String");
             jobjectArray strArr = env->NewObjectArray(n, strCls, nullptr);
             for (jsize i = 0; i < n; i++) {
                 col_value_ptr cv; cv.u8_ptr = scratch.data();
                 stm->get_col_val((uint64_t) row_ids[i], col, cv);
                 if (cv.length != UINT32_MAX) {
-                    jstring s = env->NewStringUTF(std::string((const char *) cv.u8_ptr, cv.length).c_str());
+                    jstring s = MakeJString(env, (const char *) cv.u8_ptr, cv.length);
                     env->SetObjectArrayElement(strArr, i, s);
                     env->DeleteLocalRef(s);
                 }
@@ -290,7 +334,6 @@ JNIEXPORT jobjectArray JNICALL Java_com_madras_MadrasNative_nativeGetColumnsById
             env->SetObjectArrayElement(result, c, strArr);
             env->DeleteLocalRef(strArr);
         } else if (dt == MST_BIN) {
-            jclass byteArrCls = env->FindClass("[B");
             jobjectArray blobArr = env->NewObjectArray(n, byteArrCls, nullptr);
             for (jsize i = 0; i < n; i++) {
                 col_value_ptr cv; cv.u8_ptr = scratch.data();

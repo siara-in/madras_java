@@ -36,18 +36,25 @@ class MadrasScan implements Scan, Batch {
     // practice.
     private static final ConcurrentHashMap<String, long[]> ROW_ID_CACHE = new ConcurrentHashMap<>();
 
+    private final MadrasTable table;
     private final String path;
     private final StructType schema;
     private final MadrasScanBuilder.PushedCondition pushed; // null if nothing was pushed
+    private final MadrasOptions options;
+    private final boolean countStarPushed;
 
-    MadrasScan(String path, StructType schema) {
-        this(path, schema, null);
+    MadrasScan(MadrasTable table, StructType schema, MadrasScanBuilder.PushedCondition pushed, MadrasOptions options) {
+        this(table, schema, pushed, options, false);
     }
 
-    MadrasScan(String path, StructType schema, MadrasScanBuilder.PushedCondition pushed) {
-        this.path = path;
+    MadrasScan(MadrasTable table, StructType schema, MadrasScanBuilder.PushedCondition pushed,
+               MadrasOptions options, boolean countStarPushed) {
+        this.table = table;
+        this.path = table.path();
         this.schema = schema;
         this.pushed = pushed;
+        this.options = options;
+        this.countStarPushed = countStarPushed;
     }
 
     @Override
@@ -90,47 +97,68 @@ class MadrasScan implements Scan, Batch {
         return cachedPartitions;
     }
 
+    private long[] lookupPushedRowIds() {
+        MadrasReader reader = table.metaReader();
+        int colIdx = reader.columnIndex(pushed.column);
+        switch (pushed.type) {
+            case EQ:
+                return reader.lookupRowIds(colIdx, pushed.value);
+            case IN:
+                return reader.lookupInRowIds(colIdx, pushed.values);
+            case RANGE:
+                return reader.rangeLookupRowIds(colIdx, pushed.lowerValue, pushed.lowerInclusive,
+                        pushed.upperValue, pushed.upperInclusive);
+            default:
+                throw new IllegalStateException("Unhandled pushed condition type: " + pushed.type);
+        }
+    }
+
     private InputPartition[] computeInputPartitions() {
+        if (countStarPushed) {
+            // COUNT(*), no GROUP BY. If a filter was ALSO pushed (e.g.
+            // COUNT(*) WHERE indexed_col = x), reuse its already-computed
+            // matched-row-id count; otherwise answer directly from trie
+            // metadata (table.metaReader().metadata().rows) -- no scan of
+            // any kind. This is the actual point of this pushdown: the
+            // Calcite JDBC driver was confirmed (by direct measurement) to
+            // fetch every column for every row even for a bare COUNT(*);
+            // this path never touches row data at all.
+            long count;
+            if (pushed != null) {
+                String cacheKey = path + "|" + pushed.type + "|" + pushed.column + "|"
+                        + pushed.value + "|" + pushed.values + "|"
+                        + pushed.lowerValue + "|" + pushed.lowerInclusive + "|"
+                        + pushed.upperValue + "|" + pushed.upperInclusive;
+                long[] matchedIds = ROW_ID_CACHE.computeIfAbsent(cacheKey, k -> lookupPushedRowIds());
+                count = matchedIds.length;
+            } else {
+                count = table.metaReader().metadata().rows;
+            }
+            return new InputPartition[]{new MadrasCountInputPartition(count)};
+        }
+
         if (pushed != null) {
             String cacheKey = path + "|" + pushed.type + "|" + pushed.column + "|"
                     + pushed.value + "|" + pushed.values + "|"
                     + pushed.lowerValue + "|" + pushed.lowerInclusive + "|"
                     + pushed.upperValue + "|" + pushed.upperInclusive;
 
-            long[] matchedIds = ROW_ID_CACHE.computeIfAbsent(cacheKey, k -> {
-                try (MadrasReader reader = new MadrasReader(path)) {
-                    int colIdx = reader.columnIndex(pushed.column);
-                    switch (pushed.type) {
-                        case EQ:
-                            return reader.lookupRowIds(colIdx, pushed.value);
-                        case IN:
-                            return reader.lookupInRowIds(colIdx, pushed.values);
-                        case RANGE:
-                            return reader.rangeLookupRowIds(colIdx, pushed.lowerValue, pushed.lowerInclusive,
-                                    pushed.upperValue, pushed.upperInclusive);
-                        default:
-                            throw new IllegalStateException("Unhandled pushed condition type: " + pushed.type);
-                    }
-                }
-            });
+            long[] matchedIds = ROW_ID_CACHE.computeIfAbsent(cacheKey, k -> lookupPushedRowIds());
 
             List<InputPartition> partitions = new ArrayList<>();
             for (int offset = 0; offset < matchedIds.length; offset += ROWS_PER_PARTITION) {
                 int end = (int) Math.min(offset + ROWS_PER_PARTITION, matchedIds.length);
                 long[] slice = java.util.Arrays.copyOfRange(matchedIds, offset, end);
-                partitions.add(new MadrasRowIdsInputPartition(path, slice));
+                partitions.add(new MadrasRowIdsInputPartition(path, slice, options.mmap));
             }
             return partitions.toArray(new InputPartition[0]);
         }
 
-        long rowCount;
-        try (MadrasReader reader = new MadrasReader(path)) {
-            rowCount = reader.metadata().rows;
-        }
+        long rowCount = table.metaReader().metadata().rows;
         List<InputPartition> partitions = new ArrayList<>();
         for (long offset = 0; offset < rowCount; offset += ROWS_PER_PARTITION) {
             long count = Math.min(ROWS_PER_PARTITION, rowCount - offset);
-            partitions.add(new MadrasRangeInputPartition(path, offset, count));
+            partitions.add(new MadrasRangeInputPartition(path, offset, count, options.mmap));
         }
         return partitions.toArray(new InputPartition[0]);
     }

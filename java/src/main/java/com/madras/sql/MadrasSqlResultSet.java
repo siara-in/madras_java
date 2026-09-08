@@ -1,128 +1,34 @@
-package com.madras.jdbc;
+package com.madras.sql;
 
-import com.madras.MadrasReader;
+import java.util.List;
 
 /**
- * Forward-only, read-only ResultSet over a MadrasReader's fetched columns.
- * Supported: next/close/wasNull, getString/getInt/getLong/getDouble/
- * getBoolean/getObject (by index or label), getMetaData, findColumn, getRow.
- * Everything else (updatable result sets, streaming BLOB/CLOB access,
- * cursors, RowId, scroll-sensitive navigation) throws
- * SQLFeatureNotSupportedException -- this is a minimal, forward-only reader,
- * not a full JDBC ResultSet implementation.
+ * Forward-only, read-only, fully-materialized (the native call already
+ * returns everything at once -- unlike com.madras.calcite's lazy
+ * sub-batching, not needed here given this engine's current query shapes
+ * are small point-lookups/aggregates, not large unbounded scans).
  */
-public final class MadrasResultSet implements java.sql.ResultSet {
+public final class MadrasSqlResultSet implements java.sql.ResultSet {
 
-    // Sub-batch size for lazy fetching: at most this many rows' worth of
-    // column data is materialized at once, regardless of how many total row
-    // ids matched. This is what actually prevents an unbounded "SELECT *
-    // FROM huge_table" from trying to load millions of rows into a single
-    // Java array up front -- rowIds itself is a cheap long[] (matched row
-    // ids only), but the actual column DATA is fetched incrementally as
-    // next() advances, mirroring MadrasPartitionReader's approach on the
-    // Spark side.
-    private static final int SUB_BATCH_SIZE = 50_000;
+    private final List<String> columnNames;
+    private final List<List<String>> rows;
+    private final MadrasSqlResultSetMetaData metaData;
 
-    private final MadrasReader reader;
-    private final String[] columnNames;
-    private final int[] colIndices;
-    private final long[] rowIds;
-    private final MadrasResultSetMetaData metaData;
-    private final Object[][] staticData; // non-null only for the static/pre-materialized constructor
-
-    private int cursor = -1;              // position within rowIds
-    private boolean started = false;
+    private int cursor = -1;
     private boolean closed = false;
     private boolean lastWasNull = false;
 
-    private Object[] currentBatchCols;    // column-major: one Object per column for the current sub-batch
-    private int batchStart = -1;          // index into rowIds where the current batch begins
-    private int batchLen = 0;
-    private int batchPos = 0;             // position within the current batch
-
-    MadrasResultSet(MadrasReader reader, String[] columnNames, int[] colIndices, long[] rowIds,
-                     MadrasResultSetMetaData metaData) {
-        this.reader = reader;
+    MadrasSqlResultSet(List<String> columnNames, List<List<String>> rows, MadrasSqlResultSetMetaData metaData) {
         this.columnNames = columnNames;
-        this.colIndices = colIndices;
-        this.rowIds = rowIds;
+        this.rows = rows;
         this.metaData = metaData;
-        this.staticData = null;
-    }
-
-    /**
-     * Static/pre-materialized variant, for small in-memory result sets that
-     * aren't backed by a MadrasReader lookup at all -- used by
-     * MadrasDatabaseMetaData's synthetic getTables()/getColumns()/etc.
-     * result sets, which are hand-built rows, not query results.
-     */
-    MadrasResultSet(String[] columnNames, Object[][] staticRowMajorData, long[] rowIds,
-                     MadrasResultSetMetaData metaData) {
-        this.reader = null;
-        this.columnNames = columnNames;
-        this.colIndices = null;
-        this.rowIds = rowIds;
-        this.metaData = metaData;
-        this.staticData = staticRowMajorData;
-    }
-
-    private void fetchNextBatch() {
-        int start = cursor;
-        int end = Math.min(start + SUB_BATCH_SIZE, rowIds.length);
-        if (staticData != null) {
-            batchStart = start;
-            batchLen = end - start;
-            batchPos = 0;
-            return;
-        }
-        long[] slice = java.util.Arrays.copyOfRange(rowIds, start, end);
-        currentBatchCols = reader.getColumnsByIds(slice, colIndices);
-        batchStart = start;
-        batchLen = slice.length;
-        batchPos = 0;
-    }
-
-    private Object extractFromBatch(int colIdx) {
-        if (staticData != null) {
-            return staticData[batchStart + batchPos][colIdx];
-        }
-        Object columnData = currentBatchCols[colIdx];
-        if (columnData instanceof double[]) {
-            double v = ((double[]) columnData)[batchPos];
-            return Double.isNaN(v) ? null : (Double) v;
-        }
-        if (columnData instanceof String[]) return ((String[]) columnData)[batchPos];
-        if (columnData instanceof byte[][]) return ((byte[][]) columnData)[batchPos];
-        return null;
-    }
-
-    private Object rawValue(int columnIndex) throws java.sql.SQLException {
-        if (closed) throw new java.sql.SQLException("ResultSet is closed");
-        if (!started || cursor >= rowIds.length) {
-            throw new java.sql.SQLException("No current row -- call next() first");
-        }
-        if (columnIndex < 1 || columnIndex > columnNames.length) {
-            throw new java.sql.SQLException("Invalid column index: " + columnIndex);
-        }
-        return extractFromBatch(columnIndex - 1);
     }
 
     @Override
     public boolean next() throws java.sql.SQLException {
         if (closed) throw new java.sql.SQLException("ResultSet is closed");
-        if (!started) {
-            started = true;
-            cursor = 0;
-        } else {
-            cursor++;
-        }
-        if (cursor >= rowIds.length) return false;
-        if (batchStart == -1 || cursor >= batchStart + batchLen) {
-            fetchNextBatch();
-        } else {
-            batchPos = cursor - batchStart;
-        }
-        return true;
+        cursor++;
+        return cursor < rows.size();
     }
 
     @Override
@@ -147,22 +53,29 @@ public final class MadrasResultSet implements java.sql.ResultSet {
 
     @Override
     public int findColumn(java.lang.String columnLabel) throws java.sql.SQLException {
-        for (int i = 0; i < columnNames.length; i++) {
-            if (columnNames[i].equalsIgnoreCase(columnLabel)) return i + 1;
+        for (int i = 0; i < columnNames.size(); i++) {
+            if (columnNames.get(i).equalsIgnoreCase(columnLabel)) return i + 1;
         }
         throw new java.sql.SQLException("No such column: " + columnLabel);
     }
 
     @Override
     public int getRow() throws java.sql.SQLException {
-        return started ? cursor + 1 : 0;
+        return cursor >= 0 && cursor < rows.size() ? cursor + 1 : 0;
+    }
+
+    private java.lang.String rawValue(int columnIndex) throws java.sql.SQLException {
+        if (closed) throw new java.sql.SQLException("ResultSet is closed");
+        if (cursor < 0 || cursor >= rows.size()) throw new java.sql.SQLException("No current row -- call next() first");
+        if (columnIndex < 1 || columnIndex > columnNames.size()) throw new java.sql.SQLException("Invalid column index: " + columnIndex);
+        java.lang.String v = rows.get(cursor).get(columnIndex - 1);
+        lastWasNull = (v == null || v.isEmpty());
+        return v;
     }
 
     @Override
     public java.lang.String getString(int columnIndex) throws java.sql.SQLException {
-        Object v = rawValue(columnIndex);
-        lastWasNull = (v == null);
-        return v == null ? null : String.valueOf(v);
+        return rawValue(columnIndex);
     }
 
     @Override
@@ -172,10 +85,9 @@ public final class MadrasResultSet implements java.sql.ResultSet {
 
     @Override
     public int getInt(int columnIndex) throws java.sql.SQLException {
-        Object v = rawValue(columnIndex);
-        lastWasNull = (v == null);
-        if (v == null) return 0;
-        return ((Number) v).intValue();
+        java.lang.String v = rawValue(columnIndex);
+        if (v == null || v.isEmpty()) return 0;
+        return (int) Double.parseDouble(v);
     }
 
     @Override
@@ -185,10 +97,9 @@ public final class MadrasResultSet implements java.sql.ResultSet {
 
     @Override
     public long getLong(int columnIndex) throws java.sql.SQLException {
-        Object v = rawValue(columnIndex);
-        lastWasNull = (v == null);
-        if (v == null) return 0L;
-        return ((Number) v).longValue();
+        java.lang.String v = rawValue(columnIndex);
+        if (v == null || v.isEmpty()) return 0L;
+        return (long) Double.parseDouble(v);
     }
 
     @Override
@@ -198,10 +109,9 @@ public final class MadrasResultSet implements java.sql.ResultSet {
 
     @Override
     public double getDouble(int columnIndex) throws java.sql.SQLException {
-        Object v = rawValue(columnIndex);
-        lastWasNull = (v == null);
-        if (v == null) return 0.0;
-        return ((Number) v).doubleValue();
+        java.lang.String v = rawValue(columnIndex);
+        if (v == null || v.isEmpty()) return 0.0;
+        return Double.parseDouble(v);
     }
 
     @Override
@@ -211,11 +121,9 @@ public final class MadrasResultSet implements java.sql.ResultSet {
 
     @Override
     public boolean getBoolean(int columnIndex) throws java.sql.SQLException {
-        Object v = rawValue(columnIndex);
-        lastWasNull = (v == null);
-        if (v == null) return false;
-        if (v instanceof Number) return ((Number) v).doubleValue() != 0;
-        return Boolean.parseBoolean(String.valueOf(v));
+        java.lang.String v = rawValue(columnIndex);
+        if (v == null || v.isEmpty()) return false;
+        return Boolean.parseBoolean(v) || "1".equals(v);
     }
 
     @Override
@@ -225,14 +133,44 @@ public final class MadrasResultSet implements java.sql.ResultSet {
 
     @Override
     public java.lang.Object getObject(int columnIndex) throws java.sql.SQLException {
-        Object v = rawValue(columnIndex);
-        lastWasNull = (v == null);
-        return v;
+        return rawValue(columnIndex);
     }
 
     @Override
     public java.lang.Object getObject(java.lang.String columnLabel) throws java.sql.SQLException {
         return getObject(findColumn(columnLabel));
+    }
+
+    @Override
+    public <T> T getObject(int columnIndex, java.lang.Class<T> type) throws java.sql.SQLException {
+        java.lang.Object v = getObject(columnIndex);
+        return v == null ? null : type.cast(v);
+    }
+
+    @Override
+    public <T> T getObject(java.lang.String columnLabel, java.lang.Class<T> type) throws java.sql.SQLException {
+        return getObject(findColumn(columnLabel), type);
+    }
+
+    @Override
+    public java.lang.Object getObject(int columnIndex, java.util.Map<java.lang.String, java.lang.Class<?>> map) throws java.sql.SQLException {
+        throw new java.sql.SQLFeatureNotSupportedException("getObject(int,Map)");
+    }
+
+    @Override
+    public java.lang.Object getObject(java.lang.String columnLabel, java.util.Map<java.lang.String, java.lang.Class<?>> map) throws java.sql.SQLException {
+        throw new java.sql.SQLFeatureNotSupportedException("getObject(String,Map)");
+    }
+
+    @Override
+    public <T> T unwrap(java.lang.Class<T> iface) throws java.sql.SQLException {
+        if (iface.isInstance(this)) return iface.cast(this);
+        throw new java.sql.SQLException("Not a wrapper for " + iface);
+    }
+
+    @Override
+    public boolean isWrapperFor(java.lang.Class<?> iface) throws java.sql.SQLException {
+        return iface.isInstance(this);
     }
     @Override
     public byte getByte(int arg0) throws java.sql.SQLException {
@@ -1084,36 +1022,4 @@ public final class MadrasResultSet implements java.sql.ResultSet {
         throw new java.sql.SQLFeatureNotSupportedException("updateObject");
     }
 
-
-    @Override
-    public java.lang.Object getObject(int columnIndex, java.util.Map<java.lang.String, java.lang.Class<?>> map) throws java.sql.SQLException {
-        throw new java.sql.SQLFeatureNotSupportedException("getObject(int,Map)");
-    }
-
-    @Override
-    public java.lang.Object getObject(java.lang.String columnLabel, java.util.Map<java.lang.String, java.lang.Class<?>> map) throws java.sql.SQLException {
-        throw new java.sql.SQLFeatureNotSupportedException("getObject(String,Map)");
-    }
-
-    @Override
-    public <T> T getObject(int columnIndex, java.lang.Class<T> type) throws java.sql.SQLException {
-        Object v = getObject(columnIndex);
-        return v == null ? null : type.cast(v);
-    }
-
-    @Override
-    public <T> T getObject(java.lang.String columnLabel, java.lang.Class<T> type) throws java.sql.SQLException {
-        return getObject(findColumn(columnLabel), type);
-    }
-
-    @Override
-    public <T> T unwrap(java.lang.Class<T> iface) throws java.sql.SQLException {
-        if (iface.isInstance(this)) return iface.cast(this);
-        throw new java.sql.SQLException("Not a wrapper for " + iface);
-    }
-
-    @Override
-    public boolean isWrapperFor(java.lang.Class<?> iface) throws java.sql.SQLException {
-        return iface.isInstance(this);
-    }
 }

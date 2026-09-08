@@ -49,10 +49,65 @@ dependencies {
 
     testImplementation fileTree(dir: "${sparkHome}/jars", include: '*.jar')
     testImplementation 'org.junit.jupiter:junit-jupiter:5.10.0'
+
+    // NOTE: this project no longer depends on Apache Calcite. An earlier
+    // pass added a Calcite-based JDBC driver (com.madras.calcite) for full
+    // ANSI SQL support, but it was removed in favor of the native
+    // madras_sql engine's own driver (com.madras.sql.MadrasSqlDriver) --
+    // narrower SQL support, but no external dependency tree, no Calcite
+    // per-query planning overhead, and no ~40-jar offline dependency
+    // hunt. If full ANSI SQL (JOIN/GROUP BY/window functions) is needed
+    // again later, re-adding 'org.apache.calcite:calcite-core:1.37.0' as
+    // an `implementation` dependency (and the Shadow plugin, to bundle its
+    // transitive tree into the jar) is a clean, self-contained addition --
+    // see git history for the previous working configuration.
+
+    // JLine: used only by com.madras.sql.tools.SqlCli (the interactive
+    // diagnostic tool), not by the JDBC driver itself, for readline-style
+    // line editing/history. Chosen deliberately as a single,
+    // self-contained artifact (not a sprawling transitive tree like
+    // Calcite was) to stay consistent with this project's own
+    // dependency-avoidance philosophy noted above -- true GNU readline
+    // isn't directly usable from Java (it's a C library); JLine is the
+    // standard JVM equivalent (used by the Groovy shell, Spring Boot
+    // CLI, etc.). NOT verified compiled/run in the environment that
+    // produced this change -- Maven Central wasn't reachable there: this
+    // is well-established, stable, extensively-documented JLine 3.x API
+    // usage, but build and test it for real before relying on it.
+    implementation 'org.jline:jline:3.25.1'
 }
 
 test {
     useJUnitPlatform()
+}
+
+// --------------------------------------------------------------------
+// JLine gets merged directly into madras-jvm-0.1.0.jar (unlike Spark,
+// which stays compileOnly/provided-by-cluster, and unlike Calcite's
+// ~40-jar tree, which is why THAT was never bundled this way) -- it's a
+// single, small, self-contained artifact, so merging its classes in
+// directly keeps the jar genuinely self-sufficient (matching how native
+// libmadras_jni.* is already bundled via processResources below) without
+// the risk/complexity a full Shadow-plugin fat-jar would add for
+// something this size. `zipTree` unpacks each runtime dependency jar's
+// contents directly into this jar's own contents at build time -- no
+// separate lib/ folder, no Class-Path manifest entry, no separate jar to
+// keep track of.
+//
+// DuplicatesStrategy.EXCLUDE and the META-INF signature-file exclusion
+// are standard, necessary guards for this pattern: merging a signed
+// dependency jar's signature files (META-INF/*.SF, *.DSA, *.RSA) into a
+// jar whose overall contents no longer match what was originally signed
+// causes a hard "Invalid signature file" failure at class-load time, not
+// a warning -- excluding them is required, not optional, whenever
+// merging any dependency's classes directly into another jar like this.
+// --------------------------------------------------------------------
+jar {
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+    from {
+        configurations.runtimeClasspath.collect { it.isDirectory() ? it : zipTree(it) }
+    }
+    exclude 'META-INF/*.SF', 'META-INF/*.DSA', 'META-INF/*.RSA', 'META-INF/MANIFEST.MF'
 }
 
 // --------------------------------------------------------------------
@@ -61,7 +116,7 @@ test {
 // resources/natives/<os-arch>/ tree, matching MadrasNative.java's lookup
 // path. Run the native CMake build for each target platform first (see
 // README), placing outputs under native/build-out/<os-arch>/ before
-// running `gradle jar`.
+// running `./gradlew jar`.
 // --------------------------------------------------------------------
 processResources {
     from('native/build-out') {
@@ -69,8 +124,9 @@ processResources {
     }
 }
 
-// `gradle jar` (the standard java-library task) now does everything in one
-// shot: compiles java/src/main/java, copies java/src/main/resources AND
-// native/build-out/* (via processResources above) into the jar, and
-// produces build/libs/madras-jvm-0.1.0.jar.
-
+// `./gradlew jar` now produces a single, genuinely self-sufficient
+// build/libs/madras-jvm-0.1.0.jar -- JLine's classes merged in directly,
+// plus native/build-out/*'s libraries for whichever platforms were built
+// (via processResources above). `java -cp build/libs/madras-jvm-0.1.0.jar
+// <mainclass>` needs nothing else on the classpath. Spark stays
+// compileOnly/excluded, provided by whatever cluster this runs on.
