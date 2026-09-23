@@ -1,6 +1,6 @@
 # Madras Java
 
-JNI bindings, a Java reader API, and a Spark Data Source V2 connector for Madras Sorcery `.mdsi` files.
+JNI bindings, a Java reader API with a JDBC driver, and an Apache Spark Data Source V2 connector (usable from Scala, Java, or PySpark) for Madras Sorcery `.mdsi` files.
 
 ## Madras Sorcery
 
@@ -53,16 +53,29 @@ Produces a JAR with the `com.madras.*` classes, the service registration that ma
 
 ### 3. Use it
 
-From plain Java:
+From plain Java, the low-level reader:
 
 ```java
 MadrasReader reader = new MadrasReader("data.mdsi");
 ```
 
-From Spark:
+Or via JDBC (`MadrasSqlDriver`, URL prefix `jdbc:madras-sql:`; SQL support is currently narrow — `SELECT`/`WHERE`/`LIMIT`/`COUNT(*)`, no joins or `GROUP BY` yet):
+
+```java
+Connection conn = DriverManager.getConnection("jdbc:madras-sql:/absolute/path/to/data.mdsi");
+ResultSet rs = conn.createStatement().executeQuery("SELECT * FROM t WHERE col = 'value'");
+```
+
+From Scala/Java Spark:
 
 ```scala
 val df = spark.read.format("madras").load("data.mdsi")
+```
+
+From PySpark — same Data Source V2 connector, no separate Python package needed, just put the JAR on Spark's classpath (`--jars build/libs/madras_java.jar`, or `spark.jars`):
+
+```python
+df = spark.read.format("madras").load("data.mdsi")
 ```
 
 ## License
