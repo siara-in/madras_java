@@ -1,4 +1,3 @@
-```gitignore
 # =========================
 # macOS
 # =========================
@@ -53,6 +52,10 @@ CMakeFiles/
 CMakeCache.txt
 cmake_install.cmake
 Makefile
+build_linux/
+build_macos/
+build_windows/
+build_ubuntu/
 
 # Native build output
 *.o
@@ -62,6 +65,7 @@ Makefile
 *.dylib
 *.dll
 *.exe
+*.dSYM
 
 # Native generated/build directories
 native/build/
@@ -88,8 +92,7 @@ jni/build/
 *.swp
 *.swo
 *~
-```
+
 spark-warehouse
 derby.log
 metastore_db
-
