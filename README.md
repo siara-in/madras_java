@@ -68,3 +68,7 @@ val df = spark.read.format("madras").load("data.mdsi")
 ## License
 
 This work is licensed under the MIT License. See [LICENSE](LICENSE).
+
+## Support
+
+Please feel free to communicate suggestions, improvements and corrections by creating issues here or send email to Arundale Ramanathan at arun@siara.in.
