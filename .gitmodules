@@ -1,6 +1,6 @@
-[submodule "src/madras-trie"]
-	path = src/madras-trie
-	url = https://github.com/siara-cc/madras-trie
+[submodule "src/madras_sorcery_core"]
+	path = src/madras_sorcery_core
+	url = https://github.com/siara-in/madras_sorcery_core.git
 [submodule "src/madras_sql"]
 	path = src/madras_sql
-	url = https://github.com/siara-cc/madras_sql
+	url = https://github.com/siara-in/madras_sql.git

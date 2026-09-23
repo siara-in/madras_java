@@ -6,7 +6,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # Path to madras/dv1 headers -- same layout used by madras_cli / Python bindings.
 if(NOT DEFINED MADRAS_INCLUDE_DIR)
-  set(MADRAS_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../src/madras-trie/include")
+  set(MADRAS_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../src/madras_sorcery_core/include")
 endif()
 
 # Path to the madras_sql submodule's headers (git submodule at

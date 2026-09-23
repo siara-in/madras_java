@@ -8,19 +8,27 @@ Madras Sorcery is a compact, static datastore where a single `.mdsi` file is sim
 
 ## Getting started
 
+This repository vendors [madras_sorcery_core](https://github.com/siara-in/madras_sorcery_core) and [madras_sql](https://github.com/siara-in/madras_sql) as git submodules under `src/`, so clone with:
+
+```bash
+git clone --recursive https://github.com/siara-in/madras_java.git
+# or, if already cloned:
+git submodule update --init --recursive
+```
+
 ### 1. Build the native library
 
 **Desktop (Linux/macOS/Windows), one build per target platform:**
 
 ```bash
 cd native
-cmake -B build -DMADRAS_INCLUDE_DIR=/path/to/madras_sorcery_core/include
+cmake -B build
 cmake --build build --config Release
 mkdir -p ../build-out/linux-x86_64
 cp build/libmadras_jni.so ../build-out/linux-x86_64/
 ```
 
-Repeat on each OS/arch you need, placing each output under `native/build-out/<os>-<arch>/libmadras_jni.{so,dylib,dll}`.
+Repeat on each OS/arch you need, placing each output under `native/build-out/<os>-<arch>/libmadras_jni.{so,dylib,dll}`. To build against a different checkout of the headers instead of the submodule, pass `-DMADRAS_INCLUDE_DIR=/path/to/include` (and `-DMADRAS_SQL_INCLUDE_DIR=/path/to/src` for the SQL engine headers).
 
 **Android (NDK), one build per ABI:**
 
@@ -29,8 +37,7 @@ cd native
 cmake -B build-android-arm64 \
   -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK/build/cmake/android.toolchain.cmake \
   -DANDROID_ABI=arm64-v8a \
-  -DANDROID_PLATFORM=android-24 \
-  -DMADRAS_INCLUDE_DIR=/path/to/madras_sorcery_core/include
+  -DANDROID_PLATFORM=android-24
 cmake --build build-android-arm64
 ```
 
