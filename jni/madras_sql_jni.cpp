@@ -13,14 +13,14 @@
 #include <string>
 #include <vector>
 
-#include "madras/dv1/reader/static_trie_map.hpp"
+#include "madras/dv1/reader/static_table_map.hpp"
 #include "dv1/engine.hpp"
 
 using namespace madras::dv1;
 using namespace dv1sql;
 
 struct SqlHandle {
-    std::unique_ptr<static_trie_map> stm;
+    std::unique_ptr<static_table_map> stm;
     std::vector<uint8_t> owned_buf;
     engine eng;
 };
@@ -59,7 +59,7 @@ JNIEXPORT jlong JNICALL Java_com_madras_sql_MadrasSqlNative_nativeSqlOpen(
         JNIEnv *env, jclass, jstring jpath) {
     std::string path = JStringToStd(env, jpath);
     auto *handle = new SqlHandle();
-    handle->stm = std::unique_ptr<static_trie_map>(new static_trie_map());
+    handle->stm = std::unique_ptr<static_table_map>(new static_table_map());
     try {
         handle->stm->load(path.c_str());
     } catch (int errnum) {

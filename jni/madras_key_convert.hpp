@@ -9,7 +9,7 @@
 #include <string>
 
 #include "madras/dv1/common.hpp"
-#include "madras/dv1/reader/static_trie_map.hpp"
+#include "madras/dv1/reader/static_table_map.hpp"
 
 namespace madras_cli {
 

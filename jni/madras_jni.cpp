@@ -1,6 +1,6 @@
 // madras_jni.cpp
 //
-// JNI bindings over madras::dv1::static_trie_map, mirroring the read-side
+// JNI bindings over madras::dv1::static_table_map, mirroring the read-side
 // API already proven in the Python pybind11 bindings (madras_pybind.cpp):
 // open/close, metadata, columnar batch fetch, and index/word lookup.
 //
@@ -19,7 +19,7 @@
 #include <cerrno>
 
 #include "madras/dv1/common.hpp"
-#include "madras/dv1/reader/static_trie_map.hpp"
+#include "madras/dv1/reader/static_table_map.hpp"
 #include "madras/dv1/builder/madras_builder.hpp"
 #include "madras_key_convert.hpp" // shared with madras_cli / Python bindings
 
@@ -27,12 +27,12 @@ using namespace madras::dv1;
 using namespace madras_cli;
 
 /* ---------------------------------------------------------
-   Handle wrapper: owns the static_trie_map and, if not mmap'd,
+   Handle wrapper: owns the static_table_map and, if not mmap'd,
    the backing buffer.
 --------------------------------------------------------- */
 
 struct NativeHandle {
-    std::unique_ptr<static_trie_map> stm;
+    std::unique_ptr<static_table_map> stm;
     std::vector<uint8_t> owned_buf; // only used in load_from_mem path
 };
 
@@ -89,11 +89,11 @@ JNIEXPORT jlong JNICALL Java_com_madras_MadrasNative_nativeOpen(
         JNIEnv *env, jclass, jstring jpath, jboolean use_mmap) {
     std::string path = JStringToStd(env, jpath);
     auto *handle = new NativeHandle();
-    handle->stm = std::unique_ptr<static_trie_map>(new static_trie_map());
+    handle->stm = std::unique_ptr<static_table_map>(new static_table_map());
 
-    // NOTE: static_trie_map::load(path) is NOT a real mmap -- it fread()s
+    // NOTE: static_table_map::load(path) is NOT a real mmap -- it fread()s
     // the whole file into a heap buffer it allocates internally (see
-    // static_trie_map.hpp's load()). load()/load_from_mem() both return
+    // static_table_map.hpp's load()). load()/load_from_mem() both return
     // void; load() throws the raw `errno` int on fopen failure rather than
     // returning a status. The use_mmap flag therefore doesn't currently
     // select a genuinely different I/O strategy -- both paths read the full
@@ -146,7 +146,7 @@ JNIEXPORT void JNICALL Java_com_madras_MadrasNative_nativeClose(
 JNIEXPORT jobjectArray JNICALL Java_com_madras_MadrasNative_nativeMetadata(
         JNIEnv *env, jclass, jlong handle_ptr) {
     auto *h = AsHandle(handle_ptr);
-    static_trie_map *stm = h->stm.get();
+    static_table_map *stm = h->stm.get();
 
     uint32_t col_count = stm->get_column_count();
     uintxx_t key_count = stm->get_key_count();
@@ -180,7 +180,7 @@ JNIEXPORT jobjectArray JNICALL Java_com_madras_MadrasNative_nativeGetColumns(
         JNIEnv *env, jclass, jlong handle_ptr, jlong offset, jlong count,
         jintArray jcol_indices) {
     auto *h = AsHandle(handle_ptr);
-    static_trie_map *stm = h->stm.get();
+    static_table_map *stm = h->stm.get();
 
     jsize ncols = env->GetArrayLength(jcol_indices);
     jint *col_idx_buf = env->GetIntArrayElements(jcol_indices, nullptr);
@@ -297,7 +297,7 @@ JNIEXPORT jobjectArray JNICALL Java_com_madras_MadrasNative_nativeGetColumns(
 JNIEXPORT jobjectArray JNICALL Java_com_madras_MadrasNative_nativeGetColumnsByIds(
         JNIEnv *env, jclass, jlong handle_ptr, jlongArray jrow_ids, jintArray jcol_indices) {
     auto *h = AsHandle(handle_ptr);
-    static_trie_map *stm = h->stm.get();
+    static_table_map *stm = h->stm.get();
 
     jsize ncols = env->GetArrayLength(jcol_indices);
     jint *col_idx_buf = env->GetIntArrayElements(jcol_indices, nullptr);
@@ -381,19 +381,19 @@ JNIEXPORT jobjectArray JNICALL Java_com_madras_MadrasNative_nativeGetColumnsById
 JNIEXPORT jlongArray JNICALL Java_com_madras_MadrasNative_nativeLookupRowIds(
         JNIEnv *env, jclass, jlong handle_ptr, jint col_idx, jstring jvalue) {
     auto *h = AsHandle(handle_ptr);
-    static_trie_map *stm = h->stm.get();
+    static_table_map *stm = h->stm.get();
     std::string value = JStringToStd(env, jvalue);
 
     char col_enc = stm->get_column_encoding((uint32_t) col_idx);
     char data_type = stm->get_column_type((uint32_t) col_idx);
     std::vector<uint64_t> row_ids;
 
-    static_trie_map *trie_map = stm;
+    static_table_map *table_map = stm;
     bool is_col_trie = false;
     if ((uint32_t) col_idx >= stm->get_pk_col_count() && col_enc == 'T') {
-        trie_map = stm->get_col_trie_map((uint32_t) col_idx);
-        if (!trie_map) {
-            ThrowJavaException(env, "get_col_trie_map returned null");
+        table_map = stm->get_col_table_map((uint32_t) col_idx);
+        if (!table_map) {
+            ThrowJavaException(env, "get_col_table_map returned null");
             return env->NewLongArray(0);
         }
         is_col_trie = true;
@@ -403,7 +403,7 @@ JNIEXPORT jlongArray JNICALL Java_com_madras_MadrasNative_nativeLookupRowIds(
     uintxx_t vmax = stm->get_max_val_len((uint32_t) col_idx);
     if (vmax > max_len) max_len = vmax;
     if (is_col_trie) {
-        size_t ctm = trie_map->get_max_key_len();
+        size_t ctm = table_map->get_max_key_len();
         if (ctm + 1 > max_len) max_len = ctm + 1;
     }
 
@@ -449,25 +449,25 @@ JNIEXPORT jlongArray JNICALL Java_com_madras_MadrasNative_nativeLookupRowIds(
         ConvertValueToKey(value, data_type, key.data(), key_len);
 
         iter_ctx it_ctx;
-        it_ctx.init(trie_map->get_max_key_len(), trie_map->get_max_level());
+        it_ctx.init(table_map->get_max_key_len(), table_map->get_max_level());
         std::vector<uint8_t> out_key_buf(max_len);
-        trie_map->find_first(key.data(), key_len, it_ctx, true);
-        int out_key_len = trie_map->next(it_ctx, out_key_buf.data());
+        table_map->find_first(key.data(), key_len, it_ctx, true);
+        int out_key_len = table_map->next(it_ctx, out_key_buf.data());
         while (out_key_len != -2) {
             if ((uint32_t) out_key_len == key_len &&
                 memcmp(out_key_buf.data(), key.data(), key_len) == 0) {
-                uintxx_t row_id = trie_map->leaf_rank1(it_ctx.node_path[it_ctx.cur_idx]);
+                uintxx_t row_id = table_map->leaf_rank1(it_ctx.node_path[it_ctx.cur_idx]);
                 if (is_col_trie) {
                     struct ctx_t { std::vector<uint64_t> *ids; } rcc { &row_ids };
                     auto cb = [](void *c, uintxx_t rid) -> bool {
                         ((ctx_t *) c)->ids->push_back(rid);
                         return false;
                     };
-                    static_trie_map::emit_rev_rids(trie_map, row_id, cb, &rcc);
+                    static_table_map::emit_rev_rids(table_map, row_id, cb, &rcc);
                 } else {
                     row_ids.push_back(row_id);
                 }
-                out_key_len = trie_map->next(it_ctx, out_key_buf.data());
+                out_key_len = table_map->next(it_ctx, out_key_buf.data());
             } else break;
         }
     }
@@ -499,7 +499,7 @@ JNIEXPORT jlongArray JNICALL Java_com_madras_MadrasNative_nativeRangeLookupRowId
         jstring jlower_value, jboolean lower_inclusive,
         jstring jupper_value, jboolean upper_inclusive) {
     auto *h = AsHandle(handle_ptr);
-    static_trie_map *stm = h->stm.get();
+    static_table_map *stm = h->stm.get();
     std::string lower_value = JStringToStd(env, jlower_value);
     bool has_upper = (jupper_value != nullptr);
     std::string upper_value = has_upper ? JStringToStd(env, jupper_value) : std::string();
@@ -513,12 +513,12 @@ JNIEXPORT jlongArray JNICALL Java_com_madras_MadrasNative_nativeRangeLookupRowId
         return env->NewLongArray(0);
     }
 
-    static_trie_map *trie_map = stm;
+    static_table_map *table_map = stm;
     bool is_col_trie = false;
     if ((uint32_t) col_idx >= stm->get_pk_col_count() && col_enc == 'T') {
-        trie_map = stm->get_col_trie_map((uint32_t) col_idx);
-        if (!trie_map) {
-            ThrowJavaException(env, "get_col_trie_map returned null");
+        table_map = stm->get_col_table_map((uint32_t) col_idx);
+        if (!table_map) {
+            ThrowJavaException(env, "get_col_table_map returned null");
             return env->NewLongArray(0);
         }
         is_col_trie = true;
@@ -528,7 +528,7 @@ JNIEXPORT jlongArray JNICALL Java_com_madras_MadrasNative_nativeRangeLookupRowId
     uintxx_t vmax = stm->get_max_val_len((uint32_t) col_idx);
     if (vmax > max_len) max_len = vmax;
     if (is_col_trie) {
-        size_t ctm = trie_map->get_max_key_len();
+        size_t ctm = table_map->get_max_key_len();
         if (ctm + 1 > max_len) max_len = ctm + 1;
     }
 
@@ -543,10 +543,10 @@ JNIEXPORT jlongArray JNICALL Java_com_madras_MadrasNative_nativeRangeLookupRowId
     }
 
     iter_ctx it_ctx;
-    it_ctx.init(trie_map->get_max_key_len(), trie_map->get_max_level());
+    it_ctx.init(table_map->get_max_key_len(), table_map->get_max_level());
     std::vector<uint8_t> out_key_buf(max_len);
-    trie_map->find_first(lower_key.data(), lower_key_len, it_ctx, true);
-    int out_key_len = trie_map->next(it_ctx, out_key_buf.data());
+    table_map->find_first(lower_key.data(), lower_key_len, it_ctx, true);
+    int out_key_len = table_map->next(it_ctx, out_key_buf.data());
 
     while (out_key_len != -2) {
         int cmp_lower = CompareKeyPrefix(out_key_buf.data(), (size_t) out_key_len, lower_key.data(), lower_key_len);
@@ -560,19 +560,19 @@ JNIEXPORT jlongArray JNICALL Java_com_madras_MadrasNative_nativeRangeLookupRowId
         }
 
         if (pass_lower && pass_upper) {
-            uintxx_t row_id = trie_map->leaf_rank1(it_ctx.node_path[it_ctx.cur_idx]);
+            uintxx_t row_id = table_map->leaf_rank1(it_ctx.node_path[it_ctx.cur_idx]);
             if (is_col_trie) {
                 struct ctx_t { std::vector<uint64_t> *ids; } rcc { &row_ids };
                 auto cb = [](void *c, uintxx_t rid) -> bool {
                     ((ctx_t *) c)->ids->push_back(rid);
                     return false;
                 };
-                static_trie_map::emit_rev_rids(trie_map, row_id, cb, &rcc);
+                static_table_map::emit_rev_rids(table_map, row_id, cb, &rcc);
             } else {
                 row_ids.push_back(row_id);
             }
         }
-        out_key_len = trie_map->next(it_ctx, out_key_buf.data());
+        out_key_len = table_map->next(it_ctx, out_key_buf.data());
     }
 
     jlongArray result = env->NewLongArray((jsize) row_ids.size());
