@@ -31,7 +31,7 @@ import java.util.List;
  * same underlying reason (no open-lower-bound seek support in the native
  * range lookup).
  *
- * PK columns and non-PK 'T'/'W'-encoded columns are treated identically
+ * PK columns and non-PK 'T'/'H'-encoded columns are treated identically
  * here, matching MadrasReader.isIndexable()/isRangeable() -- any known
  * discrepancy in the underlying trie library's range-seek behavior on PK
  * columns is out of scope for this layer to work around.

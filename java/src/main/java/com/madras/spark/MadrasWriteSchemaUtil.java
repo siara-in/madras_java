@@ -30,11 +30,9 @@ final class MadrasWriteSchemaUtil {
 
     /**
      * Default encoding per column: PK and text columns get trie ('t') for
-     * exact-match lookup support; everything else gets plain 'v'. No
-     * DuckDB-style sampling-based auto-encoding (word-search 'w' detection,
-     * delta/dict selection for numerics) is implemented here -- add if
-     * needed, mirroring DetectTextEncoding/DetectNumericEncoding in
-     * madras_duckdb_copyto.cpp.
+     * exact-match lookup support; everything else gets plain 'v'. The
+     * DuckDB extension's optimize_for choice (DetectTextEncoding /
+     * DetectNumericEncoding in madras_duckdb_copyto.cpp) is not mirrored here.
      */
     static char defaultEncodingFor(char mstType, boolean isPk) {
         if (mstType == 't' && isPk) return 't';

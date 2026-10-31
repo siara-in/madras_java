@@ -83,18 +83,18 @@ public final class MadrasReader implements Closeable {
      */
     /**
      * True if this column can be looked up via lookupRowIds/rangeLookupRowIds
-     * (PK columns, 'T'-encoded trie columns, or 'W'-encoded word columns).
-     * Range lookups on 'W' columns are not supported (word/phrase search is
+     * (PK columns, 'T'-encoded trie columns, or 'H'-encoded word columns).
+     * Range lookups on 'H' columns are not supported (word/phrase search is
      * exact-value only) -- see isRangeable().
      */
     public boolean isIndexable(int colIdx) {
         ColumnMeta c = metadata.columns.get(colIdx);
-        return c.encoding == 'T' || c.encoding == 'W' || colIdx < metadata.pkColumns;
+        return c.encoding == 'T' || c.encoding == 'H' || colIdx < metadata.pkColumns;
     }
 
     public boolean isRangeable(int colIdx) {
         ColumnMeta c = metadata.columns.get(colIdx);
-        return c.encoding != 'W' && isIndexable(colIdx);
+        return c.encoding != 'H' && isIndexable(colIdx);
     }
 
     public int[] dataColumnIndices() {
@@ -119,7 +119,7 @@ public final class MadrasReader implements Closeable {
     }
 
     /**
-     * Exact-match or word/phrase lookup (for 'W'-encoded columns) -> matching
+     * Exact-match or word/phrase lookup (for 'H'-encoded columns) -> matching
      * row ids. Combine with getColumnsByIds() to fetch the actual matched rows
      * without a full range scan.
      */
